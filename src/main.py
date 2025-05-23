@@ -5,7 +5,6 @@ Multi-agent music recommendation system using sophisticated planning behavior.
 Built for the AgentX competition.
 """
 
-import logging
 import os
 from contextlib import asynccontextmanager
 from typing import Dict, Any
@@ -57,7 +56,11 @@ async def lifespan(app: FastAPI):
     logger.info("🎵 Starting BeatDebate application")
     
     # Startup validation
-    required_env_vars = ["GEMINI_API_KEY", "LASTFM_API_KEY", "SPOTIFY_CLIENT_ID"]
+    required_env_vars = [
+        "GEMINI_API_KEY", 
+        "LASTFM_API_KEY", 
+        "SPOTIFY_CLIENT_ID"
+    ]
     missing_vars = [var for var in required_env_vars if not os.getenv(var)]
     
     if missing_vars:
@@ -114,7 +117,10 @@ async def health_check() -> HealthResponse:
         api_keys_configured = {
             "gemini": bool(os.getenv("GEMINI_API_KEY")),
             "lastfm": bool(os.getenv("LASTFM_API_KEY")),
-            "spotify": bool(os.getenv("SPOTIFY_CLIENT_ID") and os.getenv("SPOTIFY_CLIENT_SECRET")),
+            "spotify": bool(
+                os.getenv("SPOTIFY_CLIENT_ID") and 
+                os.getenv("SPOTIFY_CLIENT_SECRET")
+            ),
         }
         
         # Check dependencies (basic import test)
@@ -133,7 +139,9 @@ async def health_check() -> HealthResponse:
             
         try:
             import sentence_transformers
-            dependencies["sentence_transformers"] = sentence_transformers.__version__
+            dependencies["sentence_transformers"] = (
+                sentence_transformers.__version__
+            )
         except ImportError:
             dependencies["sentence_transformers"] = "not_available"
         
@@ -156,7 +164,10 @@ async def health_check() -> HealthResponse:
         
     except Exception as e:
         logger.error("Health check failed", error=str(e))
-        raise HTTPException(status_code=500, detail=f"Health check failed: {str(e)}")
+        raise HTTPException(
+            status_code=500, 
+            detail=f"Health check failed: {str(e)}"
+        )
 
 
 @app.get("/api/test")
@@ -172,8 +183,12 @@ async def test_endpoint() -> Dict[str, Any]:
             "judge": "ready"
         },
         "data_sources": {
-            "lastfm": "configured" if os.getenv("LASTFM_API_KEY") else "missing",
-            "spotify": "configured" if os.getenv("SPOTIFY_CLIENT_ID") else "missing"
+            "lastfm": (
+                "configured" if os.getenv("LASTFM_API_KEY") else "missing"
+            ),
+            "spotify": (
+                "configured" if os.getenv("SPOTIFY_CLIENT_ID") else "missing"
+            )
         }
     }
 

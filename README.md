@@ -66,7 +66,9 @@ uv run python src/main.py
 
 You'll need:
 - **Gemini API Key**: Get from [Google AI Studio](https://makersuite.google.com/app/apikey)
-- **Last.fm API Key**: Get from [Last.fm API](https://www.last.fm/api/account/create)
+- **Last.fm API Key & Shared Secret**: Get from [Last.fm API](https://www.last.fm/api/account/create)
+  - *API Key*: Required for track search and metadata (main functionality)
+  - *Shared Secret*: Optional for now, needed for user auth features
 - **Spotify Client ID/Secret**: Get from [Spotify Developer Dashboard](https://developer.spotify.com/dashboard)
 
 ## 🧪 Development
@@ -220,8 +222,3 @@ MIT License - see LICENSE file for details.
 - **Design Document**: `Design/Plans/beatdebate-design-doc.md`
 - **AgentX Course**: [LLM Agents Learning](https://llmagents-learning.org/sp25)
 - **HuggingFace Spaces**: [Coming Soon]
-- **Demo Video**: [Coming Soon]
-
----
-
-**Built for AgentX Competition 2025** | **Demonstrates Advanced Agentic Planning** 

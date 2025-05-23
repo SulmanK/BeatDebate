@@ -86,15 +86,17 @@ class LastFmClient:
     
     BASE_URL = "https://ws.audioscrobbler.com/2.0/"
     
-    def __init__(self, api_key: str, rate_limit: float = 3.0):
+    def __init__(self, api_key: str, shared_secret: Optional[str] = None, rate_limit: float = 3.0):
         """
         Initialize Last.fm client.
         
         Args:
-            api_key: Last.fm API key
+            api_key: Last.fm API key (required)
+            shared_secret: Last.fm shared secret (optional, for user auth features)
             rate_limit: Requests per second (default: 3.0)
         """
         self.api_key = api_key
+        self.shared_secret = shared_secret
         self.rate_limiter = RateLimiter(rate_limit)
         self.session: Optional[aiohttp.ClientSession] = None
         

@@ -285,7 +285,3 @@ data/artists/
 
 # Agent reasoning logs
 data/logs/agent_*.log
-
-# User profiles and sessions
-data/users/
-data/sessions/ 

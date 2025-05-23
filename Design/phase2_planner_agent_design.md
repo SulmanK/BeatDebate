@@ -244,12 +244,7 @@ src/
 - [ ] Complete workflow processes queries end-to-end
 - [ ] All agent interactions are logged for transparency
 
-### 5.2 Performance Requirements  
-- [ ] End-to-end response time < 30 seconds
-- [ ] Strategy generation < 5 seconds
-- [ ] Each advocate search < 10 seconds
-- [ ] Judge evaluation < 5 seconds
-- [ ] 95% success rate on test queries
+### 5.2 Performance Requirements  - [ ] End-to-end response time: 2-5 minutes (acceptable for demo quality)- [ ] Strategy generation: < 30 seconds- [ ] Each advocate search: < 60 seconds  - [ ] Judge evaluation: < 30 seconds- [ ] 95% success rate on test queries- [ ] Memory usage: < 1GB during operation- [ ] API rate limit compliance: Stay within Last.fm (3 req/sec) and Gemini (15 req/min) limits
 
 ### 5.3 AgentX Competition Requirements
 - [ ] Demonstrates sophisticated agentic planning behavior

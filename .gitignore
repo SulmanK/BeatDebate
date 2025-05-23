@@ -1,0 +1,291 @@
+# ================================
+# BeatDebate - Git Ignore File
+# ================================
+
+# ================================
+# Environment & Secrets
+# ================================
+# Environment files with API keys
+.env
+.env.local
+.env.development
+.env.test
+.env.production
+.env.*
+
+# User-specific secrets file
+my_secrets.md
+secrets/
+*.secret
+*.key
+
+# ================================
+# Python Cache & Build Files
+# ================================
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# C extensions
+*.so
+
+# Distribution / packaging
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+pip-wheel-metadata/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# PyInstaller
+#  Usually these files are written by a python script from a template
+#  before PyInstaller builds the exe, so as to inject date/other infos into it.
+*.manifest
+*.spec
+
+# Installer logs
+pip-log.txt
+pip-delete-this-directory.txt
+
+# Unit test / coverage reports
+htmlcov/
+.tox/
+.nox/
+.coverage
+.coverage.*
+.cache
+nosetests.xml
+coverage.xml
+*.cover
+*.py,cover
+.hypothesis/
+.pytest_cache/
+
+# Virtual environments
+.env/
+.venv/
+env/
+venv/
+ENV/
+env.bak/
+venv.bak/
+
+# ================================
+# IDE & Editor Files
+# ================================
+# PyCharm
+.idea/
+*.iws
+*.iml
+*.ipr
+
+# VS Code
+.vscode/
+*.code-workspace
+
+# Sublime Text
+*.sublime-project
+*.sublime-workspace
+
+# Vim
+*.swp
+*.swo
+*~
+
+# Emacs
+*~
+\#*\#
+/.emacs.desktop
+/.emacs.desktop.lock
+*.elc
+auto-save-list
+tramp
+.\#*
+
+# ================================
+# OS Files
+# ================================
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+Icon?
+._*
+.DocumentRevisions-V100
+.fseventsd
+.Spotlight-V100
+.TemporaryItems
+.Trashes
+.VolumeIcon.icns
+.com.apple.timemachine.donotpresent
+
+# Windows
+Thumbs.db
+Thumbs.db:encryptable
+ehthumbs.db
+ehthumbs_vista.db
+*.stackdump
+[Dd]esktop.ini
+$RECYCLE.BIN/
+*.cab
+*.msi
+*.msix
+*.msm
+*.msp
+*.lnk
+
+# Linux
+*~
+.directory
+.Trash-*
+.nfs*
+
+# ================================
+# Data & Cache Directories
+# ================================
+# Application data and cache
+data/cache/
+data/chromadb/
+data/validation/
+*.log
+logs/
+
+# Temporary files
+tmp/
+temp/
+*.tmp
+*.temp
+
+# ================================
+# Package Managers
+# ================================
+# uv cache and temp files (keep uv.lock for reproducible builds)
+.uv/
+
+# pip
+pip-log.txt
+pip-delete-this-directory.txt
+
+# Pipenv
+Pipfile.lock
+
+# Poetry
+poetry.lock
+
+# Conda
+.conda/
+
+# ================================
+# Jupyter Notebooks
+# ================================
+.ipynb_checkpoints
+*/.ipynb_checkpoints/*
+profile_default/
+ipython_config.py
+
+# ================================
+# Machine Learning & AI
+# ================================
+# Model files
+*.model
+*.pkl
+*.pickle
+*.joblib
+*.h5
+*.hdf5
+*.pt
+*.pth
+*.onnx
+
+# Dataset files (large)
+*.csv
+*.tsv
+*.json
+*.jsonl
+*.parquet
+
+# Tensorboard logs
+runs/
+logs/
+lightning_logs/
+
+# ================================
+# Docker
+# ================================
+# Docker
+.dockerignore
+Dockerfile.dev
+docker-compose.override.yml
+
+# ================================
+# Cloud & Deployment
+# ================================
+# HuggingFace
+.huggingface/
+
+# Google Cloud
+.gcloud/
+.google/
+
+# AWS
+.aws/
+
+# Azure
+.azure/
+
+# ================================
+# Miscellaneous
+# ================================
+# Backup files
+*.bak
+*.backup
+*.old
+
+# Archive files (if not needed)
+*.zip
+*.tar.gz
+*.rar
+
+# Local configuration overrides
+local_settings.py
+local_config.py
+config_local.py
+
+# API documentation
+docs/_build/
+
+# Sphinx documentation
+docs/_build/
+docs/_static/
+docs/_templates/
+
+# ================================
+# BeatDebate Specific
+# ================================
+# Validation results
+data/validation/*.json
+
+# Downloaded music metadata
+data/tracks/
+data/artists/
+
+# Agent reasoning logs
+data/logs/agent_*.log
+
+# User profiles and sessions
+data/users/
+data/sessions/ 

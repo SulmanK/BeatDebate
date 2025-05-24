@@ -7,7 +7,7 @@ agentic planning behavior for the AgentX competition.
 
 import json
 import re
-from typing import Dict, List, Any, Optional
+from typing import Dict, List, Any
 import structlog
 
 from .base_agent import BaseAgent
@@ -83,7 +83,11 @@ class PlannerAgent(BaseAgent):
             
             # Update state with strategy
             state.planning_strategy = planning_strategy
-            state.reasoning_log.append(f"PlannerAgent: Created comprehensive strategy for '{task_analysis['primary_goal']}'")
+            log_message = (
+                f"PlannerAgent: Created comprehensive strategy for "
+                f"'{task_analysis['primary_goal']}'"
+            )
+            state.reasoning_log.append(log_message)
             
             self.logger.info(
                 "Strategic planning completed",
@@ -109,16 +113,18 @@ class PlannerAgent(BaseAgent):
         Returns:
             Task analysis dictionary
         """
-        system_prompt = """You are a strategic music recommendation planner. Analyze the user's query to understand their intent, mood, and context.
-
-Extract:
-1. Primary goal (what they want to achieve with music)
-2. Complexity level (simple/medium/complex)
-3. Context factors (activity, mood, setting)
-4. Mood indicators (energy level, emotional state)
-5. Genre hints (explicit or implicit preferences)
-
-Respond in JSON format."""
+        system_prompt = (
+            "You are a strategic music recommendation planner. Analyze the "
+            "user's query to understand their intent, mood, and context."
+            "\n\n"
+            "Extract:\n"
+            "1. Primary goal (what they want to achieve with music)\n"
+            "2. Complexity level (simple/medium/complex)\n"
+            "3. Context factors (activity, mood, setting)\n"
+            "4. Mood indicators (energy level, emotional state)\n"
+            "5. Genre hints (explicit or implicit preferences)\n\n"
+            "Respond in JSON format."
+        )
 
         user_prompt = f"""Analyze this music request:
 "{user_query}"
@@ -156,11 +162,13 @@ Provide analysis in this JSON format:
         Returns:
             Coordination strategy for advocate agents
         """
-        system_prompt = """You are planning coordination between two music recommendation agents:
-1. GenreMoodAgent: Specializes in genre and mood-based search
-2. DiscoveryAgent: Specializes in similarity and underground discovery
-
-Create specific strategies for each agent based on the user's request and analysis."""
+        system_prompt = (
+            "You are planning coordination between two music recommendation agents:\n"
+            "1. GenreMoodAgent: Specializes in genre and mood-based search\n"
+            "2. DiscoveryAgent: Specializes in similarity and underground discovery\n\n"
+            "Create specific strategies for each agent based on the user's "
+            "request and analysis."
+        )
 
         user_prompt = f"""User Query: "{user_query}"
 Task Analysis: {json.dumps(task_analysis, indent=2)}
@@ -207,14 +215,15 @@ Create coordination strategy in this JSON format:
         Returns:
             Evaluation framework for judge
         """
-        system_prompt = """You are creating an evaluation framework for a judge agent to select the best music recommendations.
-
-The framework should define:
-1. Primary weights for different criteria
-2. Diversity targets
-3. Explanation style preferences
-
-Consider the user's specific request and context."""
+        system_prompt = (
+            "You are creating an evaluation framework for a judge agent to "
+            "select the best music recommendations.\n\n"
+            "The framework should define:\n"
+            "1. Primary weights for different criteria\n"
+            "2. Diversity targets\n"
+            "3. Explanation style preferences\n\n"
+            "Consider the user's specific request and context."
+        )
 
         user_prompt = f"""User Query: "{user_query}"
 Task Analysis: {json.dumps(task_analysis, indent=2)}
@@ -549,7 +558,9 @@ Create evaluation framework in this JSON format:
         
         try:
             # Combine system and user prompts
-            full_prompt = f"{system_prompt}\n\n{prompt}" if system_prompt else prompt
+            full_prompt = (
+                f"{system_prompt}\\n\\n{prompt}" if system_prompt else prompt
+            )
             
             # Call Gemini (this will be implemented when we integrate Gemini)
             # For now, return a placeholder
@@ -564,7 +575,9 @@ Create evaluation framework in this JSON format:
         """Extract PlannerAgent output data."""
         return {
             "planning_strategy_created": state.planning_strategy is not None,
-            "strategy_components": len(state.planning_strategy) if state.planning_strategy else 0
+            "strategy_components": (
+                len(state.planning_strategy) if state.planning_strategy else 0
+            )
         }
     
     def _calculate_confidence(self, state: MusicRecommenderState) -> float:
@@ -576,8 +589,12 @@ Create evaluation framework in this JSON format:
         confidence = 0.7
         
         # Increase confidence based on strategy completeness
-        required_components = ['task_analysis', 'coordination_strategy', 'evaluation_framework']
-        present_components = sum(1 for comp in required_components if comp in state.planning_strategy)
+        required_components = [
+            'task_analysis', 'coordination_strategy', 'evaluation_framework'
+        ]
+        present_components = sum(
+            1 for comp in required_components if comp in state.planning_strategy
+        )
         confidence += (present_components / len(required_components)) * 0.3
         
         return min(confidence, 1.0) 

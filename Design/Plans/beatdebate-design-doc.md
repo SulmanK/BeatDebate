@@ -97,10 +97,13 @@
 - Track availability verification
 - Rate limit: 100 requests/hour (free)
 
-#### 4.2.2 Embedding Strategy
+#### 4.2.2 Embedding Strategy (Future Enhancement - Post-MVP)
+
+**Note**: The following describes the target custom embedding strategy, which will be implemented post-MVP. For the initial MVP, agents will primarily rely on Last.fm's existing metadata, tags, and similarity functions.
+
 Following Spotify's Text2Tracks research findings:
 
-**Text Embeddings (Primary)**:
+**Text Embeddings (Primary - Post-MVP)**:
 ```python
 # Use sentence-transformers for Last.fm metadata
 from sentence_transformers import SentenceTransformer
@@ -110,7 +113,7 @@ track_text = f"{genre} {tags} {mood} {similar_artists}"
 embeddings = model.encode(track_text)
 ```
 
-**Audio Features (Enhancement)**:
+**Audio Features (Enhancement - Post-MVP)**:
 ```python
 # Spotify's pre-computed features
 audio_features = {
@@ -310,8 +313,8 @@ class ReasoningQualityMetrics:
 
 #### 4.4.1 Hosting (Free Tier)
 - **Full-Stack App**: HuggingFace Spaces (FastAPI + Web UI)
-- **Database**: Supabase free tier (500MB)
-- **Vector Store**: ChromaDB (in-memory/local file)
+- **Database**: Supabase free tier (500MB) (For potential future use like user profiles, feedback; not primary for track data in MVP)
+- **Vector Store**: ChromaDB (in-memory/local file) (Future Enhancement - Post-MVP, for custom embeddings)
 
 #### 4.4.2 Rate Limiting Strategy
 ```python
@@ -325,7 +328,7 @@ spotify_calls = 100/hour  # Audio features + previews
 
 ## 5. Implementation Plan (MVP-First Approach)
 
-### **MVP Phase: 3-Agent Core System**
+### **MVP Phase: 3-Agent Core System** (Evolved to 4-Agent MVP, see Addendum)
 
 #### **Phase 1: Foundation & Data Validation (Week 1)**
 - [ ] **Development Environment Setup**
@@ -341,14 +344,15 @@ spotify_calls = 100/hour  # Audio features + previews
 - [ ] **Core Infrastructure**
   - [ ] Implement Last.fm API client with rate limiting
   - [ ] Implement Spotify API client with caching
-  - [ ] Set up ChromaDB vector store (local file for MVP)
-  - [ ] Create basic embedding pipeline
+  - [ ] ~~Set up ChromaDB vector store (local file for MVP)~~ (Deferred to Post-MVP)
+  - [ ] ~~Create basic embedding pipeline~~ (Deferred to Post-MVP)
   - [ ] Basic health checks and error handling
 
 #### **Phase 2: MVP Agent System (Week 2)**
-- [ ] **3-Agent MVP Implementation**
-  - [ ] **AdvocateAgent A**: Genre/mood specialist
-  - [ ] **AdvocateAgent B**: Similarity/discovery specialist  
+- [ ] **3-Agent MVP Implementation** (Note: Evolved to 4-Agent MVP as per addendum below)
+  - [ ] **AdvocateAgent A**: Genre/mood specialist (relying on Last.fm data and tags)
+  - [ ] **AdvocateAgent B**: Similarity/discovery specialist (relying on Last.fm similarity functions)
+  - [ ] ~~ChromaDB Integration with DiscoveryAgent: Initial setup, and population of ChromaDB using default embeddings on basic track text (e.g., "Artist-Title") as tracks are processed from Last.fm. Querying capabilities can be experimental at this stage.~~ (Deferred to Post-MVP)
   - [ ] **JudgeAgent**: Simple ranking with explanations
 - [ ] **Basic LangGraph Workflow**
   - [ ] User query → 2 parallel advocates → judge → response
@@ -400,12 +404,12 @@ spotify_calls = 100/hour  # Audio features + previews
 
 ### **4-Agent MVP Architecture (AgentX Planning-Aligned)**
 
-Based on [AgentX course requirements](https://llmagents-learning.org/sp25) emphasizing **"search and planning"** as core agentic behavior, we're implementing a **4-agent system** that demonstrates strategic planning:
+Based on [AgentX course requirements](https://llmagents-learning.org/sp25) emphasizing **"search and planning"** as core agentic behavior, we're implementing a **4-agent system** that demonstrates strategic planning. For the MVP, all agents will primarily leverage Last.fm for music data, similarity, and tags.
 
 #### **MVP Agent Architecture**
 1. **PlannerAgent**: Strategic coordinator and planning engine ⭐ *(AgentX Core Requirement)*
-2. **GenreMoodAgent**: Genre/mood specialist advocate
-3. **DiscoveryAgent**: Similarity/discovery specialist advocate  
+2. **GenreMoodAgent**: Genre/mood specialist advocate (Utilizing Last.fm data)
+3. **DiscoveryAgent**: Similarity/discovery specialist advocate (Utilizing Last.fm similarity & data)  
 4. **JudgeAgent**: Multi-criteria decision maker with explanations
 
 #### **AgentX Planning Alignment**
@@ -482,8 +486,8 @@ class PlannerAgent:
 
 **Week 2: 4-Agent MVP System** *(Updated)*
 - [ ] **PlannerAgent**: Strategic query analysis and coordination planning
-- [ ] **GenreMoodAgent**: Strategy-guided genre/mood search implementation
-- [ ] **DiscoveryAgent**: Strategy-guided similarity/discovery search implementation
+- [ ] **GenreMoodAgent**: Strategy-guided genre/mood search implementation (relying on Last.fm data for MVP)
+- [ ] **DiscoveryAgent**: Strategy-guided similarity/discovery search implementation (relying on Last.fm similarity for MVP recommendations)
 - [ ] **JudgeAgent**: Strategy-informed multi-criteria decision making
 - [ ] **LangGraph Workflow**: User query → PlannerAgent → 2 coordinated advocates → JudgeAgent → response
 

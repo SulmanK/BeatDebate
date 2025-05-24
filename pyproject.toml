@@ -118,7 +118,7 @@ addopts = "--cov=src --cov-report=term-missing --cov-report=html"
 asyncio_mode = "auto"
 
 [tool.ruff]
-line-length = 88
+line-length = 180
 target-version = "py311"
 extend-exclude = [
     ".venv",

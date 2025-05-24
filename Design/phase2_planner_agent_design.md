@@ -25,8 +25,8 @@
 
 ### ✅ In Scope (Phase 2)
 - **PlannerAgent**: Strategic query analysis and coordination planning
-- **GenreMoodAgent**: Strategy-guided genre/mood search implementation  
-- **DiscoveryAgent**: Strategy-guided similarity/discovery search implementation
+- **GenreMoodAgent**: Strategy-guided genre/mood search implementation (primarily using Last.fm data for MVP)
+- **DiscoveryAgent**: Strategy-guided similarity/discovery search implementation (primarily using Last.fm similarity and data for MVP)
 - **JudgeAgent**: Strategy-informed multi-criteria decision making
 - **LangGraph Workflow**: Complete orchestration of 4-agent process
 - **State Management**: Shared state across agents
@@ -195,11 +195,10 @@ class JudgeAgent:
 - [ ] Basic unit tests for PlannerAgent
 
 #### Week 2 Phase 2.2: Advocate Agents (Days 3-4)  
-- [ ] Implement GenreMoodAgent with strategy execution
-- [ ] Implement DiscoveryAgent with novelty scoring
+- [ ] Implement GenreMoodAgent with strategy execution (leveraging Last.fm tags and data for MVP)
+- [ ] Implement DiscoveryAgent with novelty scoring (leveraging Last.fm similarity and data for MVP recommendations)
 - [ ] Integration with Last.fm API client
-- [ ] ChromaDB integration for similarity search
-- [ ] Unit tests for advocate agents
+- [ ] Unit tests for advocate agents.
 
 #### Week 2 Phase 2.3: Judge Agent & Workflow (Days 5-7)
 - [ ] Implement JudgeAgent with multi-criteria evaluation
@@ -284,3 +283,15 @@ src/
 4. **Ongoing**: Document all design decisions for AgentX submission
 
 This design positions us to showcase sophisticated agentic planning behavior while maintaining a clear implementation timeline for the AgentX competition deadline. 
+
+---
+
+## 8. Future Considerations (Post-MVP)
+
+- **ChromaDB Integration and Custom Embedding Implementation**: 
+  - Integrate ChromaDB as a local vector store.
+  - Transition `DiscoveryAgent` to use custom embeddings (e.g., based on `genre + tags + mood + similar_artists` as per main design document) with ChromaDB as the primary source for similarity searches.
+- **Advanced Caching**: Implement more sophisticated caching beyond basic API client caching.
+- **Performance Monitoring**: Integrate detailed performance monitoring tools.
+- **Frontend Enhancements**: Develop complex UI/UX features.
+- **Expanded Agent Capabilities**: Further refine agent reasoning, negotiation, and learning. 

@@ -198,8 +198,8 @@ class LastFmClient:
                 logger.error(
                     "Last.fm API request failed",
                     error=str(e),
-                    attempt=attempt,
-                    method=method
+                    method=method,
+                    attempt=attempt
                 )
                 if attempt == retries:
                     raise
@@ -508,4 +508,123 @@ class LastFmClient:
             results_count=len(tracks)
         )
         
-        return tracks[:limit]  # Limit final results 
+        return tracks[:limit]  # Limit final results
+    
+    async def get_artist_top_tracks(
+        self, 
+        artist: str, 
+        limit: int = 20
+    ) -> List[TrackMetadata]:
+        """
+        Get top tracks for an artist.
+        
+        Args:
+            artist: Artist name
+            limit: Maximum results
+            
+        Returns:
+            List of top tracks for the artist
+        """
+        try:
+            data = await self._make_request(
+                "artist.getTopTracks",
+                {
+                    "artist": artist,
+                    "limit": limit
+                }
+            )
+            
+            tracks = []
+            if "toptracks" in data and "track" in data["toptracks"]:
+                track_list = data["toptracks"]["track"]
+                if isinstance(track_list, dict):
+                    track_list = [track_list]
+                    
+                for track_data in track_list:
+                    track = TrackMetadata(
+                        name=track_data.get("name", ""),
+                        artist=track_data.get("artist", {}).get("name", artist),
+                        mbid=track_data.get("mbid"),
+                        url=track_data.get("url"),
+                        listeners=int(track_data.get("listeners", 0)),
+                        playcount=int(track_data.get("playcount", 0))
+                    )
+                    tracks.append(track)
+                    
+            logger.info(
+                "Artist top tracks search completed",
+                artist=artist,
+                results_count=len(tracks)
+            )
+            
+            return tracks
+            
+        except Exception as e:
+            logger.error(
+                "Artist top tracks search failed",
+                artist=artist,
+                error=str(e)
+            )
+            return []
+    
+    async def search_artists(
+        self, 
+        query: str, 
+        limit: int = 20,
+        page: int = 1
+    ) -> List[ArtistMetadata]:
+        """
+        Search for artists by query.
+        
+        Args:
+            query: Search query (artist name)
+            limit: Maximum results per page
+            page: Page number
+            
+        Returns:
+            List of artist metadata
+        """
+        try:
+            data = await self._make_request(
+                "artist.search",
+                {
+                    "artist": query,
+                    "limit": limit,
+                    "page": page
+                }
+            )
+            
+            artists = []
+            if "results" in data and "artistmatches" in data["results"]:
+                artist_matches = data["results"]["artistmatches"]
+                artist_list = artist_matches.get("artist", [])
+                
+                # Handle single artist result (not in list)
+                if isinstance(artist_list, dict):
+                    artist_list = [artist_list]
+                    
+                for artist_data in artist_list:
+                    artist = ArtistMetadata(
+                        name=artist_data.get("name", ""),
+                        mbid=artist_data.get("mbid"),
+                        url=artist_data.get("url"),
+                        listeners=int(artist_data.get("listeners", 0))
+                    )
+                    artists.append(artist)
+                    
+            logger.info(
+                "Artist search completed",
+                query=query,
+                results_count=len(artists),
+                limit=limit
+            )
+            
+            return artists
+            
+        except Exception as e:
+            logger.error(
+                "Artist search failed",
+                query=query,
+                error=str(e)
+            )
+            return [] 

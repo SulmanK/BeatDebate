@@ -365,6 +365,136 @@ class RecommendationEngine:
             error_state.reasoning_log.append(f"Workflow ERROR: Graph execution failed - {str(e)}")
             return error_state
 
+    async def get_planning_strategy(
+        self, 
+        query: str, 
+        session_id: Optional[str] = None
+    ) -> "PlanningStrategy":
+        """
+        Get the planning strategy from PlannerAgent without executing full workflow.
+        
+        This method is useful for demonstrating the PlannerAgent's strategic
+        thinking process in the UI.
+        
+        Args:
+            query: User's music preference query
+            session_id: Optional session identifier
+            
+        Returns:
+            Planning strategy from PlannerAgent
+        """
+        self.logger.info("Generating planning strategy", query=query, session_id=session_id)
+        
+        # Create initial state
+        initial_state = MusicRecommenderState(
+            user_query=query,
+            session_id=session_id or f"planning_{int(time.time())}"
+        )
+        
+        try:
+            # Execute only the planner agent
+            updated_state = await self.planner_agent.process(initial_state)
+            
+            # Extract planning strategy
+            planning_strategy = None
+            if hasattr(updated_state, 'planning_strategy'):
+                planning_strategy = updated_state.planning_strategy
+            elif isinstance(updated_state, dict) and 'planning_strategy' in updated_state:
+                planning_strategy = updated_state['planning_strategy']
+            
+            if not planning_strategy:
+                raise ValueError("PlannerAgent failed to generate planning strategy")
+            
+            self.logger.info("Planning strategy generated successfully")
+            return planning_strategy
+            
+        except Exception as e:
+            self.logger.error("Planning strategy generation failed", error=str(e))
+            raise
+
+    async def get_recommendations(
+        self,
+        query: str,
+        session_id: Optional[str] = None,
+        max_recommendations: int = 3
+    ) -> "RecommendationResponse":
+        """
+        Get music recommendations using the complete 4-agent workflow.
+        
+        Args:
+            query: User's music preference query
+            session_id: Optional session identifier
+            max_recommendations: Maximum number of recommendations to return
+            
+        Returns:
+            Complete recommendation response with tracks and explanations
+        """
+        from ..models.recommendation_models import RecommendationResponse, TrackRecommendation
+        
+        self.logger.info(
+            "Getting recommendations", 
+            query=query, 
+            session_id=session_id,
+            max_recommendations=max_recommendations
+        )
+        
+        # Process query through full workflow
+        final_state = await self.process_query(query)
+        
+        # Extract recommendations from final state
+        recommendations = []
+        if hasattr(final_state, 'final_recommendations'):
+            recommendations = final_state.final_recommendations
+        elif isinstance(final_state, dict) and 'final_recommendations' in final_state:
+            recommendations = final_state['final_recommendations']
+        
+        # Limit to max_recommendations
+        recommendations = recommendations[:max_recommendations]
+        
+        # Convert to TrackRecommendation objects if needed
+        track_recommendations = []
+        for rec in recommendations:
+            if isinstance(rec, dict):
+                track_recommendations.append(TrackRecommendation(**rec))
+            else:
+                track_recommendations.append(rec)
+        
+        # Get reasoning log
+        reasoning_log = []
+        if hasattr(final_state, 'reasoning_log'):
+            reasoning_log = final_state.reasoning_log
+        elif isinstance(final_state, dict) and 'reasoning_log' in final_state:
+            reasoning_log = final_state['reasoning_log']
+        
+        # Get processing time
+        processing_time = None
+        if hasattr(final_state, 'total_processing_time'):
+            processing_time = final_state.total_processing_time
+        elif isinstance(final_state, dict) and 'total_processing_time' in final_state:
+            processing_time = final_state['total_processing_time']
+        
+        # Create response
+        response = RecommendationResponse(
+            recommendations=track_recommendations,
+            reasoning_log=reasoning_log,
+            session_id=session_id or f"session_{int(time.time())}",
+            response_time=processing_time or 0.0,
+            agent_coordination_log=[
+                "PlannerAgent: Strategic planning completed",
+                "GenreMoodAgent: Genre/mood recommendations generated", 
+                "DiscoveryAgent: Discovery recommendations generated",
+                "JudgeAgent: Final selection and ranking completed"
+            ]
+        )
+        
+        self.logger.info(
+            "Recommendations generated successfully",
+            recommendation_count=len(track_recommendations),
+            processing_time=processing_time
+        )
+        
+        return response
+
 async def create_recommendation_engine(
     system_config: SystemConfig
 ) -> RecommendationEngine:

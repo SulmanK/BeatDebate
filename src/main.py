@@ -1,214 +1,245 @@
 """
-BeatDebate - Main Application Entry Point
+BeatDebate Main Application
 
-Multi-agent music recommendation system using sophisticated planning behavior.
-Built for the AgentX competition.
+This module provides the main entry point for the BeatDebate application,
+integrating the FastAPI backend with the Gradio frontend for a complete
+Phase 3 implementation.
 """
 
+import asyncio
+import logging
 import os
-from contextlib import asynccontextmanager
-from typing import Dict, Any
+import threading
+import time
+from typing import Optional
 
-import structlog
+import gradio as gr
 import uvicorn
-from fastapi import FastAPI, HTTPException
-from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
-from dotenv import load_dotenv
+from fastapi import FastAPI
 
-# Load environment variables
-load_dotenv()
+from .api.backend import app as fastapi_app
+from .ui.chat_interface import create_chat_interface
 
-# Configure structured logging
-structlog.configure(
-    processors=[
-        structlog.stdlib.filter_by_level,
-        structlog.stdlib.add_logger_name,
-        structlog.stdlib.add_log_level,
-        structlog.stdlib.PositionalArgumentsFormatter(),
-        structlog.processors.TimeStamper(fmt="ISO"),
-        structlog.processors.StackInfoRenderer(),
-        structlog.processors.format_exc_info,
-        structlog.processors.UnicodeDecoder(),
-        structlog.processors.JSONRenderer()
-    ],
-    context_class=dict,
-    logger_factory=structlog.stdlib.LoggerFactory(),
-    wrapper_class=structlog.stdlib.BoundLogger,
-    cache_logger_on_first_use=True,
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
-
-logger = structlog.get_logger(__name__)
-
-
-class HealthResponse(BaseModel):
-    """Health check response model."""
-    status: str
-    version: str
-    environment: str
-    api_keys_configured: Dict[str, bool]
-    dependencies: Dict[str, str]
+logger = logging.getLogger(__name__)
 
 
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    """Application lifespan manager."""
-    logger.info("🎵 Starting BeatDebate application")
+class BeatDebateApp:
+    """
+    Main BeatDebate application that runs both FastAPI backend and Gradio frontend.
     
-    # Startup validation
-    required_env_vars = [
-        "GEMINI_API_KEY", 
-        "LASTFM_API_KEY", 
-        "SPOTIFY_CLIENT_ID"
-    ]
-    missing_vars = [var for var in required_env_vars if not os.getenv(var)]
+    Features:
+    - FastAPI backend for 4-agent recommendation system
+    - Gradio frontend for ChatGPT-style interface
+    - Integrated deployment for HuggingFace Spaces
+    """
     
-    if missing_vars:
-        logger.warning(
-            "Missing environment variables",
-            missing_vars=missing_vars
+    def __init__(
+        self,
+        backend_port: int = 8000,
+        frontend_port: int = 7860,
+        backend_host: str = "127.0.0.1",
+        frontend_host: str = "0.0.0.0"
+    ):
+        """
+        Initialize the BeatDebate application.
+        
+        Args:
+            backend_port: Port for FastAPI backend
+            frontend_port: Port for Gradio frontend
+            backend_host: Host for FastAPI backend
+            frontend_host: Host for Gradio frontend
+        """
+        self.backend_port = backend_port
+        self.frontend_port = frontend_port
+        self.backend_host = backend_host
+        self.frontend_host = frontend_host
+        self.backend_url = f"http://{backend_host}:{backend_port}"
+        
+        # Application components
+        self.fastapi_app = fastapi_app
+        self.gradio_interface: Optional[gr.Blocks] = None
+        self.backend_server: Optional[uvicorn.Server] = None
+        
+        logger.info(f"BeatDebate app initialized - Backend: {self.backend_url}")
+    
+    def create_gradio_interface(self) -> gr.Blocks:
+        """Create the Gradio interface."""
+        if not self.gradio_interface:
+            self.gradio_interface = create_chat_interface(self.backend_url)
+        return self.gradio_interface
+    
+    def start_backend(self) -> None:
+        """Start the FastAPI backend server in a separate thread."""
+        def run_backend():
+            config = uvicorn.Config(
+                app=self.fastapi_app,
+                host=self.backend_host,
+                port=self.backend_port,
+                log_level="info"
+            )
+            server = uvicorn.Server(config)
+            self.backend_server = server
+            
+            logger.info(f"Starting FastAPI backend on {self.backend_url}")
+            asyncio.run(server.serve())
+        
+        backend_thread = threading.Thread(target=run_backend, daemon=True)
+        backend_thread.start()
+        
+        # Wait for backend to start
+        self._wait_for_backend()
+    
+    def _wait_for_backend(self, timeout: int = 30) -> None:
+        """Wait for the backend to be ready."""
+        import requests
+        
+        start_time = time.time()
+        while time.time() - start_time < timeout:
+            try:
+                response = requests.get(f"{self.backend_url}/health", timeout=5)
+                if response.status_code == 200:
+                    logger.info("Backend is ready!")
+                    return
+            except requests.exceptions.RequestException:
+                pass
+            
+            time.sleep(1)
+        
+        logger.warning("Backend may not be ready - continuing anyway")
+    
+    def launch_frontend(
+        self,
+        share: bool = False,
+        debug: bool = False,
+        **kwargs
+    ) -> None:
+        """
+        Launch the Gradio frontend.
+        
+        Args:
+            share: Whether to create a public link
+            debug: Whether to enable debug mode
+            **kwargs: Additional arguments for Gradio launch
+        """
+        interface = self.create_gradio_interface()
+        
+        logger.info(f"Launching Gradio frontend on port {self.frontend_port}")
+        
+        interface.launch(
+            server_name=self.frontend_host,
+            server_port=self.frontend_port,
+            share=share,
+            debug=debug,
+            **kwargs
         )
-    else:
-        logger.info("✅ All required API keys configured")
     
-    yield
+    def launch(
+        self,
+        share: bool = False,
+        debug: bool = False,
+        **kwargs
+    ) -> None:
+        """
+        Launch the complete BeatDebate application.
+        
+        Args:
+            share: Whether to create a public link
+            debug: Whether to enable debug mode
+            **kwargs: Additional arguments for Gradio launch
+        """
+        logger.info("🎵 Starting BeatDebate - AI Music Discovery System")
+        
+        # Start backend
+        self.start_backend()
+        
+        # Launch frontend
+        self.launch_frontend(share=share, debug=debug, **kwargs)
+
+
+def create_app() -> BeatDebateApp:
+    """
+    Factory function to create a BeatDebate application instance.
     
-    logger.info("🎵 Shutting down BeatDebate application")
+    Returns:
+        Configured BeatDebate application
+    """
+    # Get configuration from environment variables
+    backend_port = int(os.getenv("BACKEND_PORT", "8000"))
+    frontend_port = int(os.getenv("FRONTEND_PORT", "7860"))
+    backend_host = os.getenv("BACKEND_HOST", "127.0.0.1")
+    frontend_host = os.getenv("FRONTEND_HOST", "0.0.0.0")
+    
+    return BeatDebateApp(
+        backend_port=backend_port,
+        frontend_port=frontend_port,
+        backend_host=backend_host,
+        frontend_host=frontend_host
+    )
 
 
-# Create FastAPI application
-app = FastAPI(
-    title="BeatDebate",
-    description="Multi-Agent Music Recommendation System",
-    version="0.1.0",
-    docs_url="/docs",
-    redoc_url="/redoc",
-    lifespan=lifespan
-)
-
-# Add CORS middleware for web interface
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],  # Configure appropriately for production
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
-
-@app.get("/", response_model=Dict[str, str])
-async def root() -> Dict[str, str]:
-    """Root endpoint with basic information."""
-    return {
-        "name": "BeatDebate",
-        "description": "Multi-Agent Music Recommendation System",
-        "version": "0.1.0",
-        "status": "active",
-        "docs": "/docs",
-        "health": "/health"
-    }
-
-
-@app.get("/health", response_model=HealthResponse)
-async def health_check() -> HealthResponse:
-    """Comprehensive health check endpoint."""
+def main():
+    """Main entry point for the application."""
     try:
-        # Check environment configuration
-        api_keys_configured = {
-            "gemini": bool(os.getenv("GEMINI_API_KEY")),
-            "lastfm": bool(os.getenv("LASTFM_API_KEY")),
-            "spotify": bool(
-                os.getenv("SPOTIFY_CLIENT_ID") and 
-                os.getenv("SPOTIFY_CLIENT_SECRET")
-            ),
-        }
+        # Create and launch the application
+        app = create_app()
         
-        # Check dependencies (basic import test)
-        dependencies = {}
-        try:
-            import langchain
-            dependencies["langchain"] = langchain.__version__
-        except ImportError:
-            dependencies["langchain"] = "not_available"
-            
-        try:
-            import chromadb
-            dependencies["chromadb"] = chromadb.__version__
-        except ImportError:
-            dependencies["chromadb"] = "not_available"
-            
-        try:
-            import sentence_transformers
-            dependencies["sentence_transformers"] = (
-                sentence_transformers.__version__
-            )
-        except ImportError:
-            dependencies["sentence_transformers"] = "not_available"
+        # Check if running in HuggingFace Spaces
+        is_spaces = os.getenv("SPACE_ID") is not None
         
-        environment = os.getenv("ENVIRONMENT", "development")
-        
-        logger.info(
-            "Health check completed",
-            api_keys=api_keys_configured,
-            dependencies=dependencies,
-            environment=environment
+        app.launch(
+            share=not is_spaces,  # Don't create public links in Spaces
+            debug=os.getenv("DEBUG", "false").lower() == "true"
         )
         
-        return HealthResponse(
-            status="healthy",
-            version="0.1.0",
-            environment=environment,
-            api_keys_configured=api_keys_configured,
-            dependencies=dependencies
-        )
-        
+    except KeyboardInterrupt:
+        logger.info("Application stopped by user")
     except Exception as e:
-        logger.error("Health check failed", error=str(e))
-        raise HTTPException(
-            status_code=500, 
-            detail=f"Health check failed: {str(e)}"
+        logger.error(f"Application failed to start: {e}")
+        raise
+
+
+# HuggingFace Spaces compatibility
+def create_gradio_app() -> gr.Blocks:
+    """
+    Create a Gradio app for HuggingFace Spaces deployment.
+    
+    This function is used when deploying to HuggingFace Spaces where
+    we need to return a Gradio interface directly.
+    
+    Returns:
+        Gradio Blocks interface
+    """
+    logger.info("Creating Gradio app for HuggingFace Spaces")
+    
+    # For Spaces, we'll run everything in the same process
+    # The backend will be started automatically via the lifespan manager
+    backend_url = "http://127.0.0.1:8000"
+    
+    # Start backend in background thread
+    def start_backend_for_spaces():
+        config = uvicorn.Config(
+            app=fastapi_app,
+            host="127.0.0.1",
+            port=8000,
+            log_level="info"
         )
-
-
-@app.get("/api/test")
-async def test_endpoint() -> Dict[str, Any]:
-    """Test endpoint for development."""
-    return {
-        "message": "BeatDebate API is working!",
-        "timestamp": "2025-01-25T10:00:00Z",
-        "agents": {
-            "planner": "ready",
-            "genre_mood": "ready", 
-            "discovery": "ready",
-            "judge": "ready"
-        },
-        "data_sources": {
-            "lastfm": (
-                "configured" if os.getenv("LASTFM_API_KEY") else "missing"
-            ),
-            "spotify": (
-                "configured" if os.getenv("SPOTIFY_CLIENT_ID") else "missing"
-            )
-        }
-    }
+        server = uvicorn.Server(config)
+        asyncio.run(server.serve())
+    
+    backend_thread = threading.Thread(target=start_backend_for_spaces, daemon=True)
+    backend_thread.start()
+    
+    # Wait a moment for backend to start
+    time.sleep(2)
+    
+    # Create and return the Gradio interface
+    return create_chat_interface(backend_url)
 
 
 if __name__ == "__main__":
-    # Get configuration from environment
-    port = int(os.getenv("GRADIO_SERVER_PORT", 7860))
-    debug = os.getenv("DEBUG_MODE", "true").lower() == "true"
-    
-    logger.info(
-        "Starting BeatDebate server",
-        port=port,
-        debug=debug,
-        environment=os.getenv("ENVIRONMENT", "development")
-    )
-    
-    uvicorn.run(
-        "src.main:app",
-        host="0.0.0.0",
-        port=port,
-        reload=debug,
-        log_level="info"
-    ) 
+    main() 

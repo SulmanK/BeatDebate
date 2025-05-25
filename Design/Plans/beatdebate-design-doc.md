@@ -364,6 +364,7 @@ spotify_calls = 100/hour  # Audio features + previews
   - [ ] Audio preview integration
 
 #### **Phase 3: Frontend & UX (Week 3)**
+- [ ] **Implement FastAPI backend**: Expose the `RecommendationEngine` service via API endpoints.
 - [ ] **ChatGPT-Style Interface**
   - [ ] Gradio ChatInterface implementation
   - [ ] Conversation history management
@@ -492,7 +493,12 @@ class PlannerAgent:
 - [ ] **LangGraph Workflow**: User query → PlannerAgent → 2 coordinated advocates → JudgeAgent → response
 
 **Week 3: Frontend & UX**
-- [ ] Gradio ChatInterface implementation
+- [ ] **Implement FastAPI backend**: Expose the `RecommendationEngine` service via API endpoints.
+- [ ] **ChatGPT-Style Interface**
+  - [ ] Gradio ChatInterface implementation
+  - [ ] Conversation history management
+  - [ ] Audio preview embedding
+  - [ ] Feedback collection (👍/👎)
 - [ ] **Planning visualization**: Show PlannerAgent strategy in UI
 - [ ] Error handling and loading states
 - [ ] Performance optimization with caching
@@ -574,10 +580,30 @@ def validate_lastfm_quality():
     # Test: metadata richness, discovery potential, diversity
 ```
 
-**Spotify Integration Test**:
+**Spotify API Validation**
 ```python
+# Test Spotify preview availability and audio features
 def validate_spotify_integration():
-    # Test: preview availability, audio features, response times
+    sample_track_ids = get_sample_track_ids(50)
+    
+    results = {
+        "preview_availability": 0,
+        "audio_features_coverage": 0,
+        "api_response_time": []
+    }
+    
+    for track_id in sample_track_ids:
+        # Test preview availability
+        track = spotify_client.get_track(track_id)
+        if track.preview_url:
+            results["preview_availability"] += 1
+            
+        # Test audio features
+        features = spotify_client.get_audio_features(track_id)
+        if features:
+            results["audio_features_coverage"] += 1
+    
+    return results
 ```
 
 ### **Caching & Rate Limiting**

@@ -4,37 +4,78 @@ Agent Models for BeatDebate Multi-Agent Music Recommendation System
 Pydantic models for state management, agent communication, and data structures.
 """
 
-from typing import Dict, List, Any, Optional
+from typing import Dict, List, Any, Optional, Annotated
 from pydantic import BaseModel, Field
 from datetime import datetime
+
+
+def keep_first(x: Any, y: Any) -> Any:
+    """Reducer that keeps the first non-None value"""
+    # If x is None or empty, use y
+    if x is None or (isinstance(x, (list, dict, str)) and len(x) == 0):
+        return y
+    # Otherwise keep x (the first/existing value)
+    return x
+
+
+def list_replace_reducer(x: List, y: List) -> List:
+    """Reducer that replaces the list entirely if y is not empty"""
+    if y is None:
+        return x if x is not None else []
+    if len(y) > 0:
+        return y
+    return x if x is not None else []
+
+
+def list_append_reducer(x: List, y: List) -> List:
+    """Reducer that appends new items to existing list"""
+    if x is None:
+        x = []
+    if y is None:
+        y = []
+    return x + y
+
+
+def dict_update_reducer(x: Dict, y: Dict) -> Dict:
+    """Reducer that updates dictionary with new values"""
+    if x is None:
+        x = {}
+    if y is None:
+        y = {}
+    result = x.copy()
+    result.update(y)
+    return result
 
 
 class MusicRecommenderState(BaseModel):
     """Shared state across all agents in the LangGraph workflow"""
     
-    # Input
-    user_query: str = Field(..., description="Original user query for music recommendation")
-    user_profile: Optional[Dict[str, Any]] = Field(default=None, description="User preferences and history")
+    # Input - these should not change after initial setting
+    user_query: Annotated[str, keep_first] = Field(..., description="Original user query for music recommendation")
+    user_profile: Annotated[Optional[Dict[str, Any]], keep_first] = Field(default=None, description="User preferences and history")
     
-    # Planning phase
-    planning_strategy: Optional[Dict[str, Any]] = Field(default=None, description="Strategy created by PlannerAgent")
-    execution_plan: Optional[Dict[str, Any]] = Field(default=None, description="Execution monitoring plan")
+    # Planning phase - set once by planner
+    planning_strategy: Annotated[Optional[Dict[str, Any]], keep_first] = Field(default=None, description="Strategy created by PlannerAgent")
+    execution_plan: Annotated[Optional[Dict[str, Any]], keep_first] = Field(default=None, description="Execution monitoring plan")
     
-    # Advocate phase  
-    genre_mood_recommendations: List[Dict] = Field(default_factory=list, description="GenreMoodAgent recommendations")
-    discovery_recommendations: List[Dict] = Field(default_factory=list, description="DiscoveryAgent recommendations")
+    # Advocate phase - these will be updated by parallel agents
+    genre_mood_recommendations: Annotated[List[Dict], list_append_reducer] = Field(default_factory=list, description="GenreMoodAgent recommendations")
+    discovery_recommendations: Annotated[List[Dict], list_append_reducer] = Field(default_factory=list, description="DiscoveryAgent recommendations")
     
-    # Judge phase
-    final_recommendations: List[Dict] = Field(default_factory=list, description="Final selected recommendations")
+    # Judge phase - set by judge agent
+    final_recommendations: Annotated[List[Dict], list_replace_reducer] = Field(default_factory=list, description="Final selected recommendations")
     
-    # Reasoning transparency
-    reasoning_log: List[str] = Field(default_factory=list, description="Step-by-step reasoning log")
-    agent_deliberations: List[Dict] = Field(default_factory=list, description="Agent decision records")
+    # Reasoning transparency - can be updated by any agent
+    reasoning_log: Annotated[List[str], list_append_reducer] = Field(default_factory=list, description="Step-by-step reasoning log")
+    agent_deliberations: Annotated[List[Dict], list_append_reducer] = Field(default_factory=list, description="Agent decision records")
     
-    # Metadata
-    processing_start_time: Optional[float] = Field(default=None, description="Processing start timestamp")
-    total_processing_time: Optional[float] = Field(default=None, description="Total processing time in seconds")
-    session_id: Optional[str] = Field(default=None, description="Unique session identifier")
+    # Error handling - can be set by any agent
+    error_info: Annotated[Optional[Dict[str, str]], keep_first] = Field(default=None, description="Error information if workflow fails")
+    
+    # Metadata - set once at start, updated at end
+    processing_start_time: Annotated[Optional[float], keep_first] = Field(default=None, description="Processing start timestamp")
+    total_processing_time: Annotated[Optional[float], keep_first] = Field(default=None, description="Total processing time in seconds")
+    session_id: Annotated[Optional[str], keep_first] = Field(default=None, description="Unique session identifier")
 
 
 class AgentStrategy(BaseModel):

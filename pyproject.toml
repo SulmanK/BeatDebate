@@ -71,7 +71,7 @@ build-backend = "hatchling.build"
 packages = ["src"]
 
 [tool.black]
-line-length = 88
+line-length = 180
 target-version = ['py311']
 include = '\.pyi?$'
 extend-exclude = '''
@@ -91,7 +91,7 @@ extend-exclude = '''
 [tool.isort]
 profile = "black"
 multi_line_output = 3
-line_length = 88
+line_length = 180
 known_first_party = ["beatdebate"]
 
 [tool.mypy]

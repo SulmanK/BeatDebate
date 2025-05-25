@@ -94,7 +94,7 @@ class GenreMoodAgent(BaseAgent):
             )
             
             # Update state
-            state.genre_mood_recommendations = [rec.dict() for rec in recommendations]
+            state.genre_mood_recommendations = [rec.model_dump() for rec in recommendations]
             state.reasoning_log.append(
                 f"GenreMoodAgent: Generated {len(recommendations)} "
                 f"mood-based recommendations for '{mood_analysis['primary_mood']}'"

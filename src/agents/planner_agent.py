@@ -231,14 +231,14 @@ Task Analysis: {json.dumps(task_analysis, indent=2)}
 Create evaluation framework in this JSON format:
 {{
     "primary_weights": {{
-        "relevance": 0.0-1.0,
-        "novelty": 0.0-1.0,
-        "quality": 0.0-1.0,
-        "mood_match": 0.0-1.0,
-        "context_fit": 0.0-1.0
+        "confidence": 0.0-1.0,
+        "novelty_score": 0.0-1.0,
+        "quality_score": 0.0-1.0,
+        "concentration_friendliness_score": 0.0-1.0
     }},
     "diversity_targets": {{
-        "genre": 1-3,
+        "attributes": ["genres", "artist"],
+        "genres": 1-3,
         "era": 1-3,
         "energy": 1-2,
         "artist": 2-3
@@ -373,12 +373,12 @@ Create evaluation framework in this JSON format:
         framework.setdefault('primary_weights', {})
         framework.setdefault('diversity_targets', {})
         
-        # Set default weights
+        # Set default weights using correct field names from TrackRecommendation model
         weights = framework['primary_weights']
-        weights.setdefault('relevance', 0.3)
-        weights.setdefault('novelty', 0.25)
-        weights.setdefault('quality', 0.25)
-        weights.setdefault('mood_match', 0.2)
+        weights.setdefault('confidence', 0.3)  # Overall confidence/relevance
+        weights.setdefault('novelty_score', 0.25)
+        weights.setdefault('quality_score', 0.25)
+        weights.setdefault('concentration_friendliness_score', 0.2)
         
         # Normalize weights to sum to 1.0
         total_weight = sum(weights.values())
@@ -386,9 +386,10 @@ Create evaluation framework in this JSON format:
             for key in weights:
                 weights[key] = weights[key] / total_weight
         
-        # Set default diversity targets
+        # Set default diversity targets with correct attribute names
         diversity = framework['diversity_targets']
-        diversity.setdefault('genre', 2)
+        diversity.setdefault('attributes', ['genres', 'artist'])  # Add attributes list
+        diversity.setdefault('genres', 2)
         diversity.setdefault('era', 2)
         diversity.setdefault('energy', 1)
         diversity.setdefault('artist', 3)
@@ -456,19 +457,20 @@ Create evaluation framework in this JSON format:
         """Fallback evaluation framework using templates."""
         return {
             'primary_weights': {
-                'relevance': 0.3,
-                'novelty': 0.25,
-                'quality': 0.25,
-                'mood_match': 0.2
+                'confidence': 0.3,
+                'novelty_score': 0.25,
+                'quality_score': 0.25,
+                'concentration_friendliness_score': 0.2
             },
             'diversity_targets': {
-                'genre': 2,
+                'attributes': ['genres', 'artist'],
+                'genres': 2,
                 'era': 2,
                 'energy': 1,
                 'artist': 3
             },
             'explanation_style': 'detailed',
-            'selection_criteria': ['relevance', 'novelty', 'quality']
+            'selection_criteria': ['confidence', 'novelty_score', 'quality_score']
         }
     
     def _initialize_query_patterns(self) -> Dict[str, List[str]]:
@@ -559,12 +561,11 @@ Create evaluation framework in this JSON format:
         try:
             # Combine system and user prompts
             full_prompt = (
-                f"{system_prompt}\\n\\n{prompt}" if system_prompt else prompt
+                f"{system_prompt}\n\n{prompt}" if system_prompt else prompt
             )
             
-            # Call Gemini (this will be implemented when we integrate Gemini)
-            # For now, return a placeholder
-            response = await self.llm_client.generate_content(full_prompt)
+            # Call Gemini (synchronous call, not async)
+            response = self.llm_client.generate_content(full_prompt)
             return response.text
             
         except Exception as e:

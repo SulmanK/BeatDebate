@@ -6,7 +6,7 @@ in real-time for the UI, showcasing the planning behavior for AgentX.
 """
 
 import logging
-from typing import Dict, List, Any, Optional
+from typing import Dict, Any
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -26,7 +26,7 @@ class PlanningDisplay:
     
     def __init__(self):
         """Initialize the planning display."""
-        self.logger = logger.bind(component="PlanningDisplay")
+        self.logger = logger
     
     def format_planning_strategy(self, strategy: Dict[str, Any]) -> str:
         """
@@ -55,12 +55,16 @@ class PlanningDisplay:
             # Coordination Strategy
             coordination = strategy.get("coordination_strategy", {})
             if coordination:
-                html_parts.append(self._format_coordination_strategy(coordination))
+                coordination_html = self._format_coordination_strategy(
+                    coordination
+                )
+                html_parts.append(coordination_html)
             
             # Evaluation Framework
             evaluation = strategy.get("evaluation_framework", {})
             if evaluation:
-                html_parts.append(self._format_evaluation_framework(evaluation))
+                evaluation_html = self._format_evaluation_framework(evaluation)
+                html_parts.append(evaluation_html)
             
             # Execution Monitoring
             execution = strategy.get("execution_monitoring", {})
@@ -119,6 +123,12 @@ class PlanningDisplay:
             </div>
             """
         
+        flex_style = (
+            "display: flex; justify-content: space-between; "
+            "align-items: center;"
+        )
+        goal_style = "color: #333; font-size: 0.95em;"
+        
         return f"""
         <div style="
             background: #f8f9fa;
@@ -127,8 +137,8 @@ class PlanningDisplay:
             margin: 8px 0;
             border-radius: 0 5px 5px 0;
         ">
-            <div style="display: flex; justify-content: space-between; align-items: center;">
-                <strong style="color: #333; font-size: 0.95em;">🎯 Primary Goal</strong>
+            <div style="{flex_style}">
+                <strong style="{goal_style}">🎯 Primary Goal</strong>
                 <span style="
                     background: {complexity_color};
                     color: white;
@@ -147,7 +157,10 @@ class PlanningDisplay:
         </div>
         """
     
-    def _format_coordination_strategy(self, coordination: Dict[str, Any]) -> str:
+    def _format_coordination_strategy(
+        self, 
+        coordination: Dict[str, Any]
+    ) -> str:
         """Format agent coordination strategy."""
         agents_html = []
         
@@ -155,6 +168,10 @@ class PlanningDisplay:
         genre_mood = coordination.get("genre_mood_agent", {})
         if genre_mood:
             focus = genre_mood.get("focus", "Genre and mood analysis")
+            genre_style = "color: #155724; font-size: 0.85em;"
+            genre_p_style = (
+                "margin: 3px 0 0 0; color: #155724; font-size: 0.8em;"
+            )
             agents_html.append(f"""
             <div style="
                 background: #e8f5e8;
@@ -163,8 +180,8 @@ class PlanningDisplay:
                 padding: 8px;
                 margin: 5px 0;
             ">
-                <strong style="color: #155724; font-size: 0.85em;">🎸 GenreMoodAgent</strong>
-                <p style="margin: 3px 0 0 0; color: #155724; font-size: 0.8em;">
+                <strong style="{genre_style}">🎸 GenreMoodAgent</strong>
+                <p style="{genre_p_style}">
                     {focus}
                 </p>
             </div>
@@ -174,6 +191,10 @@ class PlanningDisplay:
         discovery = coordination.get("discovery_agent", {})
         if discovery:
             focus = discovery.get("focus", "Discovery and novelty search")
+            discovery_style = "color: #856404; font-size: 0.85em;"
+            discovery_p_style = (
+                "margin: 3px 0 0 0; color: #856404; font-size: 0.8em;"
+            )
             agents_html.append(f"""
             <div style="
                 background: #fff3cd;
@@ -182,14 +203,15 @@ class PlanningDisplay:
                 padding: 8px;
                 margin: 5px 0;
             ">
-                <strong style="color: #856404; font-size: 0.85em;">🔍 DiscoveryAgent</strong>
-                <p style="margin: 3px 0 0 0; color: #856404; font-size: 0.8em;">
+                <strong style="{discovery_style}">🔍 DiscoveryAgent</strong>
+                <p style="{discovery_p_style}">
                     {focus}
                 </p>
             </div>
             """)
         
         agents_content = "\n".join(agents_html)
+        coord_style = "color: #333; font-size: 0.95em;"
         
         return f"""
         <div style="
@@ -199,14 +221,17 @@ class PlanningDisplay:
             margin: 8px 0;
             border-radius: 0 5px 5px 0;
         ">
-            <strong style="color: #333; font-size: 0.95em;">🤝 Agent Coordination</strong>
+            <strong style="{coord_style}">🤝 Agent Coordination</strong>
             <div style="margin-top: 8px;">
                 {agents_content}
             </div>
         </div>
         """
     
-    def _format_evaluation_framework(self, evaluation: Dict[str, Any]) -> str:
+    def _format_evaluation_framework(
+        self, 
+        evaluation: Dict[str, Any]
+    ) -> str:
         """Format evaluation framework."""
         weights = evaluation.get("primary_weights", {})
         diversity_targets = evaluation.get("diversity_targets", {})
@@ -215,12 +240,25 @@ class PlanningDisplay:
         weights_html = ""
         if weights:
             weight_items = []
-            for criterion, weight in list(weights.items())[:3]:  # Limit to 3
-                weight_percent = int(weight * 100) if isinstance(weight, float) else weight
+            # Limit to 3 items
+            for criterion, weight in list(weights.items())[:3]:
+                if isinstance(weight, float):
+                    weight_percent = int(weight * 100)
+                else:
+                    weight_percent = weight
+                    
+                criterion_name = criterion.replace('_', ' ').title()
+                flex_style = (
+                    "display: flex; justify-content: space-between; "
+                    "margin: 3px 0;"
+                )
+                criterion_style = "font-size: 0.8em;"
+                weight_style = "font-weight: bold; font-size: 0.8em;"
+                
                 weight_items.append(f"""
-                <div style="display: flex; justify-content: space-between; margin: 3px 0;">
-                    <span style="font-size: 0.8em;">{criterion.replace('_', ' ').title()}</span>
-                    <span style="font-weight: bold; font-size: 0.8em;">{weight_percent}%</span>
+                <div style="{flex_style}">
+                    <span style="{criterion_style}">{criterion_name}</span>
+                    <span style="{weight_style}">{weight_percent}%</span>
                 </div>
                 """)
             weights_html = "\n".join(weight_items)
@@ -235,6 +273,8 @@ class PlanningDisplay:
             </div>
             """
         
+        eval_style = "color: #333; font-size: 0.95em;"
+        
         return f"""
         <div style="
             background: #f8f9fa;
@@ -243,7 +283,7 @@ class PlanningDisplay:
             margin: 8px 0;
             border-radius: 0 5px 5px 0;
         ">
-            <strong style="color: #333; font-size: 0.95em;">⚖️ Evaluation Criteria</strong>
+            <strong style="{eval_style}">⚖️ Evaluation Criteria</strong>
             <div style="margin-top: 8px;">
                 {weights_html}
                 {diversity_html}
@@ -251,7 +291,10 @@ class PlanningDisplay:
         </div>
         """
     
-    def _format_execution_monitoring(self, execution: Dict[str, Any]) -> str:
+    def _format_execution_monitoring(
+        self, 
+        execution: Dict[str, Any]
+    ) -> str:
         """Format execution monitoring setup."""
         quality_thresholds = execution.get("quality_thresholds", {})
         fallback_strategies = execution.get("fallback_strategies", [])
@@ -262,7 +305,7 @@ class PlanningDisplay:
             min_confidence = quality_thresholds.get("min_confidence", 0.6)
             threshold_html = f"""
             <div style="font-size: 0.8em; color: #6c757d;">
-                <strong>Quality Gate:</strong> {min_confidence:.0%} minimum confidence
+                <strong>Quality Gate:</strong> {min_confidence:.0%} minimum
             </div>
             """
         
@@ -272,9 +315,11 @@ class PlanningDisplay:
             fallback_count = len(fallback_strategies)
             fallback_html = f"""
             <div style="font-size: 0.8em; color: #6c757d; margin-top: 5px;">
-                <strong>Fallback Plans:</strong> {fallback_count} strategies ready
+                <strong>Fallback Plans:</strong> {fallback_count} strategies
             </div>
             """
+        
+        exec_style = "color: #333; font-size: 0.95em;"
         
         return f"""
         <div style="
@@ -284,7 +329,7 @@ class PlanningDisplay:
             margin: 8px 0;
             border-radius: 0 5px 5px 0;
         ">
-            <strong style="color: #333; font-size: 0.95em;">📊 Execution Monitoring</strong>
+            <strong style="{exec_style}">📊 Execution Monitoring</strong>
             <div style="margin-top: 8px;">
                 {threshold_html}
                 {fallback_html}
@@ -345,6 +390,7 @@ class PlanningDisplay:
         }
         
         icon = stage_icons.get(stage, "🧠")
+        details_text = f": {details}" if details else ""
         
         return f"""
         <div style="
@@ -356,7 +402,6 @@ class PlanningDisplay:
             font-size: 0.9em;
             text-align: center;
         ">
-            {icon} <strong>{stage.title()}</strong>
-            {f": {details}" if details else ""}
+            {icon} <strong>{stage.title()}</strong>{details_text}
         </div>
         """ 

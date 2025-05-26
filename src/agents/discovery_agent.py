@@ -15,9 +15,9 @@ import structlog
 from .base_agent import BaseAgent
 from ..models.agent_models import (
     MusicRecommenderState, 
-    AgentConfig, 
-    TrackRecommendation
+    AgentConfig
 )
+from ..models.recommendation_models import TrackRecommendation
 from ..api.lastfm_client import LastFmClient
 
 logger = structlog.get_logger(__name__)
@@ -44,7 +44,9 @@ class DiscoveryAgent(BaseAgent):
             gemini_client: Gemini LLM client for reasoning (optional)
         """
         super().__init__(config)
-        self.lastfm_client = lastfm_client
+        # Store client configuration instead of client instance
+        self.lastfm_api_key = lastfm_client.api_key
+        self.lastfm_rate_limit = lastfm_client.rate_limiter.calls_per_second
         self.llm_client = gemini_client
         
         # Discovery strategies and seed artists
@@ -101,7 +103,7 @@ class DiscoveryAgent(BaseAgent):
             )
             
             # Update state
-            state.discovery_recommendations = [rec.dict() for rec in recommendations]
+            state.discovery_recommendations = [rec.model_dump() for rec in recommendations]
             state.reasoning_log.append(
                 f"DiscoveryAgent: Generated {len(recommendations)} "
                 f"discovery recommendations with {discovery_analysis['underground_bias']:.1f} underground bias"
@@ -279,7 +281,7 @@ class DiscoveryAgent(BaseAgent):
         strategy: Dict[str, Any]
     ) -> List[Dict[str, Any]]:
         """
-        Explore similar music using seed artists.
+        Explore similar music using seed artists and Last.fm similarity.
         
         Args:
             seed_artists: List of seed artist names
@@ -289,92 +291,105 @@ class DiscoveryAgent(BaseAgent):
         Returns:
             List of candidate tracks from exploration
         """
+        from ..api.lastfm_client import LastFmClient
+        
         all_tracks = []
         
-        for seed_artist in seed_artists:
-            try:
-                # Get similar artists
-                similar_artists = await self._get_similar_artists(seed_artist)
-                
-                # Get tracks from similar artists
-                for similar_artist in similar_artists[:3]:  # Top 3 similar artists
+        # Create a new Last.fm client for this exploration session
+        async with LastFmClient(
+            api_key=self.lastfm_api_key,
+            rate_limit=self.lastfm_rate_limit
+        ) as client:
+            for seed_artist in seed_artists:
+                try:
+                    # Get similar artists
+                    similar_artists = await self._get_similar_artists(seed_artist, client)
+                    
+                    # Get tracks from similar artists
+                    for similar_artist in similar_artists[:3]:  # Top 3 similar artists
+                        try:
+                            # Get top tracks from similar artist
+                            artist_tracks = await client.get_artist_top_tracks(
+                                similar_artist, limit=10
+                            )
+                            
+                            if artist_tracks:
+                                # Add discovery context to tracks, ensure proper format for testing
+                                for track_metadata in artist_tracks:
+                                    # Convert TrackMetadata to dict consistently
+                                    if hasattr(track_metadata, 'name'):
+                                        # TrackMetadata object
+                                        track = {
+                                            'name': track_metadata.name, 
+                                            'artist': track_metadata.artist,
+                                            'url': track_metadata.url,
+                                            'listeners': track_metadata.listeners,
+                                            'mbid': track_metadata.mbid
+                                        }
+                                    else:
+                                        # Already a dict
+                                        track = track_metadata
+                                    
+                                    track['seed_artist'] = seed_artist
+                                    track['similar_artist'] = similar_artist
+                                    track['discovery_method'] = 'artist_similarity'
+                                    all_tracks.append(track)
+                                
+                            # Small delay for rate limiting
+                            await asyncio.sleep(0.1)
+                            
+                        except Exception as e:
+                            self.logger.warning(
+                                "Failed to get tracks for similar artist",
+                                similar_artist=similar_artist,
+                                error=str(e)
+                            )
+                            continue
+                    
+                    # Also search for tracks by the seed artist itself
                     try:
-                        # Get top tracks from similar artist
-                        artist_tracks = await self.lastfm_client.get_artist_top_tracks(
-                            similar_artist, limit=10
+                        seed_tracks = await client.get_artist_top_tracks(
+                            seed_artist, limit=5
                         )
                         
-                        if artist_tracks:
-                            # Add discovery context to tracks, ensure proper format for testing
-                            for track in artist_tracks:
-                                # Make sure track is a dict for tests
-                                if not isinstance(track, dict):
-                                    # Convert to dict if TrackMetadata object
+                        if seed_tracks:
+                            for track_metadata in seed_tracks:
+                                # Convert TrackMetadata to dict consistently
+                                if hasattr(track_metadata, 'name'):
+                                    # TrackMetadata object
                                     track = {
-                                        'name': track.name, 
-                                        'artist': track.artist,
-                                        'url': track.url,
-                                        'listeners': track.listeners
+                                        'name': track_metadata.name, 
+                                        'artist': track_metadata.artist,
+                                        'url': track_metadata.url,
+                                        'listeners': track_metadata.listeners,
+                                        'mbid': track_metadata.mbid
                                     }
-                                
+                                else:
+                                    # Already a dict
+                                    track = track_metadata
+                                    
                                 track['seed_artist'] = seed_artist
-                                track['similar_artist'] = similar_artist
-                                track['discovery_method'] = 'artist_similarity'
+                                track['similar_artist'] = seed_artist
+                                track['discovery_method'] = 'seed_artist'
+                                all_tracks.append(track)
                             
-                            all_tracks.extend(artist_tracks)
-                            
-                        # Small delay for rate limiting
-                        await asyncio.sleep(0.1)
-                        
                     except Exception as e:
                         self.logger.warning(
-                            "Failed to get tracks for similar artist",
-                            similar_artist=similar_artist,
+                            "Failed to get seed artist tracks",
+                            seed_artist=seed_artist,
                             error=str(e)
                         )
-                        continue
-                
-                # Also search for tracks by the seed artist itself
-                try:
-                    seed_tracks = await self.lastfm_client.get_artist_top_tracks(
-                        seed_artist, limit=5
-                    )
                     
-                    if seed_tracks:
-                        for track in seed_tracks:
-                            # Make sure track is a dict for tests
-                            if not isinstance(track, dict):
-                                # Convert to dict if TrackMetadata object
-                                track = {
-                                    'name': track.name, 
-                                    'artist': track.artist,
-                                    'url': track.url,
-                                    'listeners': track.listeners
-                                }
-                                
-                            track['seed_artist'] = seed_artist
-                            track['similar_artist'] = seed_artist
-                            track['discovery_method'] = 'seed_artist'
-                        
-                        all_tracks.extend(seed_tracks)
-                        
+                    # Rate limiting delay
+                    await asyncio.sleep(0.2)
+                    
                 except Exception as e:
                     self.logger.warning(
-                        "Failed to get seed artist tracks",
+                        "Failed to explore similar music for seed",
                         seed_artist=seed_artist,
                         error=str(e)
                     )
-                
-                # Rate limiting delay
-                await asyncio.sleep(0.2)
-                
-            except Exception as e:
-                self.logger.warning(
-                    "Failed to explore similar music for seed",
-                    seed_artist=seed_artist,
-                    error=str(e)
-                )
-                continue
+                    continue
         
         # Remove duplicates
         unique_tracks = []
@@ -402,12 +417,13 @@ class DiscoveryAgent(BaseAgent):
         
         return unique_tracks[:100]  # Limit to 100 candidates
     
-    async def _get_similar_artists(self, artist_name: str) -> List[str]:
+    async def _get_similar_artists(self, artist_name: str, client: LastFmClient) -> List[str]:
         """
         Get similar artists using Last.fm API.
         
         Args:
             artist_name: Name of the seed artist
+            client: Last.fm API client
             
         Returns:
             List of similar artist names
@@ -415,13 +431,18 @@ class DiscoveryAgent(BaseAgent):
         try:
             # This would use Last.fm's artist.getSimilar method
             # For now, we'll simulate with a search-based approach
-            search_results = await self.lastfm_client.search_artists(artist_name, limit=10)
+            search_results = await client.search_artists(artist_name, limit=10)
             
             if search_results:
                 # Return artist names from search results
                 similar_artists = []
                 for result in search_results[1:6]:  # Skip first (likely exact match)
-                    artist = result.get('name')
+                    # Handle both ArtistMetadata objects and dictionaries
+                    if hasattr(result, 'name'):
+                        artist = result.name
+                    else:
+                        artist = result.get('name')
+                    
                     if artist and artist.lower() != artist_name.lower():
                         similar_artists.append(artist)
                 
@@ -639,22 +660,17 @@ class DiscoveryAgent(BaseAgent):
                 recommendation = TrackRecommendation(
                     title=track.get('name', 'Unknown Title'),
                     artist=track.get('artist', 'Unknown Artist'),
-                    album=track.get('album', {}).get('title') if isinstance(track.get('album'), dict) else None,
-                    lastfm_url=track.get('url'),
+                    id=track.get('mbid') or f"lastfm_{track.get('artist', 'unknown')}_{track.get('name', 'unknown')}".replace(' ', '_').lower(),
+                    source="lastfm",
+                    album_title=track.get('album', {}).get('title') if isinstance(track.get('album'), dict) else None,
+                    track_url=track.get('url'),
                     genres=genres,
-                    tags=tags,
-                    reasoning_chain=reasoning,
-                    confidence_score=track.get('novelty_score', 0.5),
+                    moods=tags,
                     novelty_score=track.get('novelty_score', 0.5),
-                    relevance_score=track.get('novelty_score', 0.5) * 0.8,  # Slightly lower relevance for discovery
-                    recommending_agent="DiscoveryAgent",
-                    strategy_applied={
-                        "exploration_type": discovery_analysis['exploration_type'],
-                        "underground_bias": discovery_analysis['underground_bias'],
-                        "discovery_method": track.get('discovery_method', 'unknown'),
-                        "seed_artist": track.get('seed_artist'),
-                        "novelty_priority": discovery_analysis['novelty_priority']
-                    }
+                    quality_score=self._calculate_quality_score(track),
+                    concentration_friendliness_score=self._calculate_concentration_score(discovery_analysis, track),
+                    confidence=track.get('novelty_score', 0.5),
+                    advocate_source_agent="DiscoveryAgent"
                 )
                 
                 recommendations.append(recommendation)
@@ -810,12 +826,46 @@ class DiscoveryAgent(BaseAgent):
         
         try:
             full_prompt = f"{system_prompt}\n\n{prompt}" if system_prompt else prompt
-            response = await self.llm_client.generate_content(full_prompt)
+            response = self.llm_client.generate_content(full_prompt)
             return response.text
             
         except Exception as e:
             self.logger.error("Gemini API call failed", error=str(e))
             raise
+    
+    def _calculate_quality_score(self, track: Dict[str, Any]) -> float:
+        """Calculate quality score based on track metadata."""
+        score = 0.5  # Base score
+        
+        # Higher score for tracks with more metadata
+        if track.get('listeners'):
+            try:
+                listeners = int(track['listeners'])
+                if listeners > 100000:
+                    score += 0.2
+                elif listeners > 10000:
+                    score += 0.1
+            except (ValueError, TypeError):
+                pass
+                
+        # Bonus for having album info
+        if track.get('album'):
+            score += 0.1
+            
+        return max(0.0, min(1.0, score))
+    
+    def _calculate_concentration_score(self, discovery_analysis: Dict[str, Any], track: Dict[str, Any]) -> float:
+        """Calculate concentration friendliness score for a track."""
+        score = 0.4  # Base score (slightly lower for discovery tracks)
+        
+        # Discovery tracks might be less concentration-friendly
+        novelty_score = track.get('novelty_score', 0.5)
+        if novelty_score > 0.7:
+            score -= 0.1  # Very novel tracks might be distracting
+        elif novelty_score < 0.3:
+            score += 0.2  # Familiar tracks are better for concentration
+            
+        return max(0.0, min(1.0, score))
     
     def _extract_output_data(self, state: MusicRecommenderState) -> Dict[str, Any]:
         """Extract DiscoveryAgent output data."""

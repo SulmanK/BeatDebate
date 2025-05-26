@@ -285,3 +285,4 @@ data/artists/
 
 # Agent reasoning logs
 data/logs/agent_*.log
+/.gradio

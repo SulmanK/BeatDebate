@@ -89,7 +89,8 @@ class JudgeAgent:
             evaluation_framework # Pass the whole framework for context in explanations
         )
         
-        state.final_recommendations = final_selections_with_explanations
+        # Convert TrackRecommendation objects to dictionaries for state compatibility
+        state.final_recommendations = [track.model_dump() for track in final_selections_with_explanations]
         log_message = f"JudgeAgent: Successfully selected {len(final_selections_with_explanations)} tracks out of {len(all_candidate_dicts)} candidates."
         self.logger.info(log_message)
         state.reasoning_log.append(log_message)

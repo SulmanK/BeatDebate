@@ -5,7 +5,6 @@ This module provides a ChatGPT-style interface that showcases the 4-agent
 planning system with real-time progress indicators and planning visualization.
 """
 
-import asyncio
 import logging
 import time
 import uuid
@@ -13,9 +12,7 @@ from typing import Dict, List, Optional, Tuple, Any
 
 import gradio as gr
 import requests
-from gradio.components import Chatbot, Textbox, Button, HTML, Audio
 
-from ..models.recommendation_models import RecommendationResponse
 from .response_formatter import ResponseFormatter
 from .planning_display import PlanningDisplay
 
@@ -48,88 +45,86 @@ class BeatDebateChatInterface:
         self.planning_display = PlanningDisplay()
         self.session_id = str(uuid.uuid4())
         self.conversation_history: List[Dict[str, Any]] = []
+        self.playlist: List[Dict[str, Any]] = []  # User's playlist
         
-        logger.info(f"BeatDebate Chat Interface initialized with session: {self.session_id}")
+        logger.info(
+            f"BeatDebate Chat Interface initialized with session: "
+            f"{self.session_id}"
+        )
     
     async def process_message(
         self, 
         message: str, 
-        history: List[List[str]]
-    ) -> Tuple[str, List[List[str]], str, str]:
+        history: List[Tuple[str, str]]
+    ) -> Tuple[str, List[Tuple[str, str]], str, str]:
         """
         Process user message and return formatted response.
         
         Args:
             message: User's music query
-            history: Conversation history
+            history: Conversation history in tuple format
             
         Returns:
-            Tuple of (response, updated_history, planning_html, progress_html)
+            Tuple of (response, updated_history, playlist_html, progress_html)
         """
         if not message.strip():
-            return "", history, "", ""
+            return "", history, self._create_playlist_html(), ""
         
         logger.info(f"Processing message: {message}")
         
         try:
-            # Add user message to history
-            history.append([message, ""])
-            
             # Show initial progress
-            progress_html = self._create_progress_html("🧠 PlannerAgent is analyzing your request...")
+            progress_html = self._create_progress_html(
+                "🧠 PlannerAgent is analyzing your request..."
+            )
             
-            # Get planning strategy first
-            planning_response = await self._get_planning_strategy(message)
-            planning_html = ""
-            
-            if planning_response:
-                planning_html = self.planning_display.format_planning_strategy(
-                    planning_response["strategy"]
-                )
-                progress_html = self._create_progress_html(
-                    "🎸 GenreMoodAgent and 🔍 DiscoveryAgent are searching..."
-                )
-            
-            # Get full recommendations
+            # Get recommendations (now includes chat history)
             recommendations_response = await self._get_recommendations(message)
             
             if recommendations_response:
                 # Format the response
-                formatted_response = self.response_formatter.format_recommendations(
-                    recommendations_response
+                formatted_response = (
+                    self.response_formatter.format_recommendations(
+                        recommendations_response
+                    )
                 )
                 
-                # Update history with bot response
-                history[-1][1] = formatted_response
+                # Add to history using tuple format
+                history.append((message, formatted_response))
                 
                 # Store in conversation history
                 self.conversation_history.append({
                     "user_message": message,
                     "bot_response": formatted_response,
-                    "recommendations": recommendations_response.get("recommendations", []),
+                    "recommendations": recommendations_response.get(
+                        "recommendations", []
+                    ),
                     "timestamp": time.time()
                 })
                 
-                progress_html = self._create_progress_html("✅ Recommendations complete!")
+                progress_html = self._create_progress_html(
+                    "✅ Recommendations complete!"
+                )
+                playlist_html = self._create_playlist_html()
                 
-                return "", history, planning_html, progress_html
+                return "", history, playlist_html, progress_html
             else:
-                error_response = "I'm sorry, I couldn't generate recommendations right now. Please try again."
-                history[-1][1] = error_response
+                error_response = (
+                    "I'm sorry, I couldn't generate recommendations right now. "
+                    "Please try again."
+                )
+                history.append((message, error_response))
                 progress_html = self._create_progress_html("❌ Error occurred")
                 
-                return "", history, planning_html, progress_html
+                return "", history, self._create_playlist_html(), progress_html
                 
         except Exception as e:
             logger.error(f"Error processing message: {e}")
             error_response = f"An error occurred: {str(e)}"
-            if history and len(history) > 0:
-                history[-1][1] = error_response
-            else:
-                history.append([message, error_response])
+            history.append((message, error_response))
             
             progress_html = self._create_progress_html("❌ Error occurred")
-            return "", history, "", progress_html
+            return "", history, self._create_playlist_html(), progress_html
     
     async def _get_planning_strategy(self, query: str) -> Optional[Dict]:
         """Get planning strategy from backend."""
@@ -146,7 +141,9 @@ class BeatDebateChatInterface:
             if response.status_code == 200:
                 return response.json()
             else:
-                logger.error(f"Planning request failed: {response.status_code}")
+                logger.error(
+                    f"Planning request failed: {response.status_code}"
+                )
                 return None
                 
         except Exception as e:
@@ -154,23 +151,42 @@ class BeatDebateChatInterface:
             return None
     
     async def _get_recommendations(self, query: str) -> Optional[Dict]:
-        """Get recommendations from backend."""
+        """Get recommendations from backend with chat history context."""
         try:
+            # Prepare request with chat history context
+            request_data = {
+                "query": query,
+                "session_id": self.session_id,
+                "max_recommendations": 3,
+                "include_previews": True
+            }
+            
+            # Add chat history context if available
+            if self.conversation_history:
+                # Get last 3 interactions for context
+                recent_history = self.conversation_history[-3:]
+                request_data["chat_context"] = {
+                    "previous_queries": [
+                        h["user_message"] for h in recent_history
+                    ],
+                    "previous_recommendations": [
+                        h.get("recommendations", [])[:1]  # Just first track
+                        for h in recent_history
+                    ]
+                }
+            
             response = requests.post(
                 f"{self.backend_url}/recommendations",
-                json={
-                    "query": query,
-                    "session_id": self.session_id,
-                    "max_recommendations": 3,
-                    "include_previews": True
-                },
+                json=request_data,
                 timeout=60
             )
             
             if response.status_code == 200:
                 return response.json()
             else:
-                logger.error(f"Recommendations request failed: {response.status_code}")
+                logger.error(
+                    f"Recommendations request failed: {response.status_code}"
+                )
                 return None
                 
         except Exception as e:
@@ -215,6 +231,71 @@ class BeatDebateChatInterface:
             logger.error(f"Error submitting feedback: {e}")
             return "❌ Error submitting feedback"
     
+    def add_to_playlist(self, track_data: Dict[str, Any]) -> str:
+        """Add a track to the user's playlist."""
+        try:
+            # Avoid duplicates
+            track_id = f"{track_data.get('artist', '')}_{track_data.get('title', '')}"
+            existing_ids = [
+                f"{t.get('artist', '')}_{t.get('title', '')}" 
+                for t in self.playlist
+            ]
+            
+            if track_id not in existing_ids:
+                self.playlist.append(track_data)
+                return f"✅ Added '{track_data.get('title', 'Unknown')}' to playlist!"
+            else:
+                return "ℹ️ Track already in playlist"
+                
+        except Exception as e:
+            logger.error(f"Error adding to playlist: {e}")
+            return "❌ Error adding track"
+    
+    def _create_playlist_html(self) -> str:
+        """Create HTML for the playlist builder."""
+        if not self.playlist:
+            return """
+            <div style="
+                padding: 15px; 
+                background: #f8f9fa;
+                border: 1px solid #dee2e6;
+                border-radius: 8px; 
+                margin: 5px 0;
+                text-align: center;
+            ">
+                <h4>🎵 Your Playlist</h4>
+                <p><em>No tracks yet!</em></p>
+                <p>👍 Like recommendations to add them here</p>
+            </div>
+            """
+        
+        playlist_html = [
+            """
+            <div style="
+                padding: 15px; 
+                background: #f8f9fa;
+                border: 1px solid #dee2e6;
+                border-radius: 8px; 
+                margin: 5px 0;
+            ">
+                <h4>🎵 Your Playlist ({} tracks)</h4>
+            """.format(len(self.playlist))
+        ]
+        
+        for i, track in enumerate(self.playlist[-5:], 1):  # Show last 5
+            title = track.get('title', 'Unknown')[:30]
+            artist = track.get('artist', 'Unknown')[:20]
+            playlist_html.append(
+                f"<p><strong>{i}.</strong> {title}<br>"
+                f"<small>by {artist}</small></p>"
+            )
+        
+        if len(self.playlist) > 5:
+            playlist_html.append(f"<p><em>...and {len(self.playlist) - 5} more</em></p>")
+        
+        playlist_html.append("</div>")
+        return "".join(playlist_html)
+
     def create_interface(self) -> gr.Blocks:
         """
         Create the Gradio interface.
@@ -230,12 +311,14 @@ class BeatDebateChatInterface:
                 max-height: 600px;
                 overflow-y: auto;
             }
-            .planning-container {
+            .playlist-container {
                 background: #f8f9fa;
                 border: 1px solid #dee2e6;
                 border-radius: 8px;
                 padding: 15px;
                 margin: 10px 0;
+                max-height: 400px;
+                overflow-y: auto;
             }
             .progress-container {
                 margin: 10px 0;
@@ -246,10 +329,9 @@ class BeatDebateChatInterface:
             # Header
             gr.Markdown("""
             # 🎵 BeatDebate
-            ### AI Music Discovery with Strategic Agent Planning
+            ### AI Music Discovery with Playlist Builder
             
-            Tell me what music you're in the mood for, and watch my 4 AI agents 
-            debate to find you the perfect tracks!
+            Tell me what music you're in the mood for, and build your perfect playlist!
             """)
             
             with gr.Row():
@@ -258,7 +340,11 @@ class BeatDebateChatInterface:
                     chatbot = gr.Chatbot(
                         label="Music Recommendations",
                         height=500,
-                        elem_classes=["chat-container"]
+                        elem_classes=["chat-container"],
+                        show_label=True,
+                        container=True,
+                        scale=1,
+                        render_markdown=True
                     )
                     
                     # Progress indicator
@@ -277,21 +363,31 @@ class BeatDebateChatInterface:
                         send_btn = gr.Button("Send", scale=1, variant="primary")
                 
                 with gr.Column(scale=1):
-                    # Planning strategy display
-                    planning_display = gr.HTML(
-                        label="🧠 Agent Planning Strategy",
-                        elem_classes=["planning-container"]
+                    # Playlist builder
+                    playlist_display = gr.HTML(
+                        label="🎵 Your Playlist",
+                        elem_classes=["playlist-container"]
                     )
                     
-                    # Session info
-                    gr.Markdown(f"""
-                    **Session ID:** `{self.session_id[:8]}...`
+                    # Playlist actions
+                    gr.Markdown("""
+                    **🎯 How to build your playlist:**
+                    - 👍 Like tracks to add them
+                    - Ask for "more like track #2"
+                    - Build themed playlists
                     
-                    **How it works:**
-                    1. 🧠 **PlannerAgent** analyzes your request
-                    2. 🎸 **GenreMoodAgent** finds genre/mood matches
-                    3. 🔍 **DiscoveryAgent** discovers hidden gems
-                    4. ⚖️ **JudgeAgent** selects the best recommendations
+                    **💡 Try these:**
+                    - "Add some variety"
+                    - "More underground tracks"
+                    - "Something for working out"
+                    """)
+                    
+                    # Export options (future feature)
+                    gr.Markdown("""
+                    **📤 Export Options:**
+                    - Spotify playlist *(coming soon)*
+                    - Apple Music *(coming soon)*
+                    - Download as text
                     """)
             
             # Example queries
@@ -315,13 +411,13 @@ class BeatDebateChatInterface:
             send_btn.click(
                 fn=handle_message,
                 inputs=[msg_input, chatbot],
-                outputs=[msg_input, chatbot, planning_display, progress_display]
+                outputs=[msg_input, chatbot, playlist_display, progress_display]
             )
             
             msg_input.submit(
                 fn=handle_message,
                 inputs=[msg_input, chatbot],
-                outputs=[msg_input, chatbot, planning_display, progress_display]
+                outputs=[msg_input, chatbot, playlist_display, progress_display]
             )
         
         return interface

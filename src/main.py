@@ -16,9 +16,13 @@ from typing import Optional
 import gradio as gr
 import uvicorn
 from fastapi import FastAPI
+from dotenv import load_dotenv
 
 from .api.backend import app as fastapi_app
 from .ui.chat_interface import create_chat_interface
+
+# Load environment variables from .env file
+load_dotenv()
 
 # Configure logging
 logging.basicConfig(

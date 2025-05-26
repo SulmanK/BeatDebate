@@ -12,9 +12,9 @@ import structlog
 from .base_agent import BaseAgent
 from ..models.agent_models import (
     MusicRecommenderState, 
-    AgentConfig, 
-    TrackRecommendation
+    AgentConfig
 )
+from ..models.recommendation_models import TrackRecommendation
 from ..api.lastfm_client import LastFmClient
 
 logger = structlog.get_logger(__name__)
@@ -41,7 +41,9 @@ class GenreMoodAgent(BaseAgent):
             gemini_client: Gemini LLM client for reasoning (optional)
         """
         super().__init__(config)
-        self.lastfm_client = lastfm_client
+        # Store client configuration instead of client instance
+        self.lastfm_api_key = lastfm_client.api_key
+        self.lastfm_rate_limit = lastfm_client.rate_limiter.calls_per_second
         self.llm_client = gemini_client
         
         # Mood and energy mappings
@@ -252,6 +254,8 @@ class GenreMoodAgent(BaseAgent):
         Returns:
             List of candidate tracks from Last.fm
         """
+        from ..api.lastfm_client import LastFmClient
+        
         all_tracks = []
         
         # Search with primary tag combinations
@@ -261,41 +265,46 @@ class GenreMoodAgent(BaseAgent):
             [search_tags[0]] if search_tags else ['indie']  # Single primary tag
         ]
         
-        for tag_combo in primary_combinations:
-            if not tag_combo:
-                continue
-                
-            try:
-                # Search by tag
-                tag_query = ' '.join(tag_combo)
-                track_metadata_list = await self.lastfm_client.search_tracks(tag_query, limit=20)
-                
-                if track_metadata_list:
-                    # Convert to dictionaries and add search context
-                    for track_metadata in track_metadata_list:
-                        # Handle mocked track metadata in tests
-                        track = self._track_metadata_to_dict(track_metadata)
-                        if track:
-                            track['search_tags'] = tag_combo.copy()
-                            track['search_type'] = 'tag_based'
-                            all_tracks.append(track)
+        # Create a new Last.fm client for this search session
+        async with LastFmClient(
+            api_key=self.lastfm_api_key,
+            rate_limit=self.lastfm_rate_limit
+        ) as client:
+            for tag_combo in primary_combinations:
+                if not tag_combo:
+                    continue
                     
-                    self.logger.debug(
-                        "Tag search completed",
-                        tags=tag_combo,
-                        track_count=len(track_metadata_list)
+                try:
+                    # Search by tag
+                    tag_query = ' '.join(tag_combo)
+                    track_metadata_list = await client.search_tracks(tag_query, limit=20)
+                    
+                    if track_metadata_list:
+                        # Convert to dictionaries and add search context
+                        for track_metadata in track_metadata_list:
+                            # Handle mocked track metadata in tests
+                            track = self._track_metadata_to_dict(track_metadata)
+                            if track:
+                                track['search_tags'] = tag_combo.copy()
+                                track['search_type'] = 'tag_based'
+                                all_tracks.append(track)
+                        
+                        self.logger.debug(
+                            "Tag search completed",
+                            tags=tag_combo,
+                            track_count=len(track_metadata_list)
+                        )
+                    
+                    # Small delay to respect rate limits
+                    await asyncio.sleep(0.1)
+                    
+                except Exception as e:
+                    self.logger.error(
+                        "Track search failed",
+                        query=tag_query,
+                        error=str(e)
                     )
-                
-                # Small delay to respect rate limits
-                await asyncio.sleep(0.1)
-                
-            except Exception as e:
-                self.logger.warning(
-                    "Tag search failed",
-                    tags=tag_combo,
-                    error=str(e)
-                )
-                continue
+                    continue
         
         # Remove duplicates based on artist + title
         unique_tracks = []
@@ -445,20 +454,18 @@ class GenreMoodAgent(BaseAgent):
                 recommendation = TrackRecommendation(
                     title=track.get('name', 'Unknown Title'),
                     artist=track.get('artist', 'Unknown Artist'),
-                    album=track.get('album', {}).get('title') if isinstance(track.get('album'), dict) else None,
-                    lastfm_url=track.get('url'),
+                    id=track.get('mbid') or f"lastfm_{track.get('artist', 'unknown')}_{track.get('name', 'unknown')}".replace(' ', '_').lower(),
+                    source="lastfm",
+                    album_title=track.get('album', {}).get('title') if isinstance(track.get('album'), dict) else None,
+                    track_url=track.get('url'),
                     genres=genres,
-                    tags=tags,
-                    reasoning_chain=reasoning,
-                    confidence_score=track.get('genre_mood_score', 0.5),
-                    relevance_score=track.get('genre_mood_score', 0.5),
-                    recommending_agent="GenreMoodAgent",
-                    strategy_applied={
-                        "mood_focus": mood_analysis['primary_mood'],
-                        "energy_level": mood_analysis['energy_level'],
-                        "search_tags": track.get('search_tags', []),
-                        "genre_areas": strategy.get('focus_areas', [])
-                    }
+                    moods=tags,
+                    # Add scoring fields for Judge Agent
+                    quality_score=track.get('genre_mood_score', 0.5),
+                    novelty_score=0.3,  # GenreMoodAgent focuses on established genres, lower novelty
+                    concentration_friendliness_score=self._calculate_concentration_score(mood_analysis, track),
+                    confidence=track.get('genre_mood_score', 0.5),
+                    advocate_source_agent="GenreMoodAgent"
                 )
                 
                 recommendations.append(recommendation)
@@ -590,12 +597,32 @@ class GenreMoodAgent(BaseAgent):
         
         try:
             full_prompt = f"{system_prompt}\n\n{prompt}" if system_prompt else prompt
-            response = await self.llm_client.generate_content(full_prompt)
+            response = self.llm_client.generate_content(full_prompt)
             return response.text
             
         except Exception as e:
             self.logger.error("Gemini API call failed", error=str(e))
             raise
+    
+    def _calculate_concentration_score(self, mood_analysis: Dict[str, Any], track: Dict[str, Any]) -> float:
+        """Calculate concentration friendliness score for a track."""
+        score = 0.5  # Base score
+        
+        # Higher score for calm/focus moods
+        primary_mood = mood_analysis.get('primary_mood', '')
+        if primary_mood in ['chill', 'focus', 'peaceful', 'calm']:
+            score += 0.3
+        elif primary_mood in ['energetic', 'party', 'aggressive']:
+            score -= 0.2
+            
+        # Energy level consideration
+        energy_level = mood_analysis.get('energy_level', 'medium')
+        if energy_level == 'low':
+            score += 0.2
+        elif energy_level == 'high':
+            score -= 0.1
+            
+        return max(0.0, min(1.0, score))
     
     def _extract_output_data(self, state: MusicRecommenderState) -> Dict[str, Any]:
         """Extract GenreMoodAgent output data."""

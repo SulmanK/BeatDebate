@@ -24,6 +24,35 @@ logger = structlog.get_logger(__name__)
 T = TypeVar('T')
 
 
+def create_gemini_client(api_key: str):
+    """
+    Create and configure a Gemini client.
+    
+    Args:
+        api_key: Gemini API key
+        
+    Returns:
+        Configured Gemini client
+    """
+    try:
+        import google.generativeai as genai
+        
+        # Configure the API key
+        genai.configure(api_key=api_key)
+        
+        # Create the model
+        model = genai.GenerativeModel('gemini-2.0-flash-exp')
+        
+        return model
+        
+    except ImportError:
+        logger.error("google-generativeai package not installed")
+        return None
+    except Exception as e:
+        logger.error("Failed to create Gemini client", error=str(e))
+        return None
+
+
 class RecommendationEngine:
     """
     Orchestrates the multi-agent workflow for music recommendations using LangGraph.
@@ -416,7 +445,8 @@ class RecommendationEngine:
         self,
         query: str,
         session_id: Optional[str] = None,
-        max_recommendations: int = 3
+        max_recommendations: int = 3,
+        chat_context: Optional[Dict] = None
     ) -> "RecommendationResponse":
         """
         Get music recommendations using the complete 4-agent workflow.
@@ -425,6 +455,7 @@ class RecommendationEngine:
             query: User's music preference query
             session_id: Optional session identifier
             max_recommendations: Maximum number of recommendations to return
+            chat_context: Previous chat context for continuity
             
         Returns:
             Complete recommendation response with tracks and explanations
@@ -438,8 +469,19 @@ class RecommendationEngine:
             max_recommendations=max_recommendations
         )
         
+        # Enhance query with chat context if available
+        enhanced_query = query
+        if chat_context:
+            previous_queries = chat_context.get("previous_queries", [])
+            previous_recs = chat_context.get("previous_recommendations", [])
+            
+            if previous_queries:
+                context_info = f"Previous requests: {', '.join(previous_queries[-2:])}"
+                enhanced_query = f"{query} (Context: {context_info})"
+                self.logger.info(f"Enhanced query with context: {enhanced_query}")
+        
         # Process query through full workflow
-        final_state = await self.process_query(query)
+        final_state = await self.process_query(enhanced_query)
         
         # Extract recommendations from final state
         recommendations = []
@@ -515,12 +557,18 @@ async def create_recommendation_engine(
         rate_limit=system_config.lastfm_rate_limit
     )
     
-    # Initialize agents with their configurations
+    # Create Gemini client
+    gemini_client = create_gemini_client(system_config.gemini_api_key)
+    if not gemini_client:
+        logger.warning("Gemini client creation failed, agents will use fallback strategies")
+    
+    # Initialize agents with their configurations and clients
     planner_agent = PlannerAgent(
         config=system_config.agent_configs.get("planner", AgentConfig(
             agent_name="PlannerAgent",
             agent_type="planner"
-        ))
+        )),
+        gemini_client=gemini_client
     )
     
     genre_mood_agent = GenreMoodAgent(
@@ -528,7 +576,8 @@ async def create_recommendation_engine(
             agent_name="GenreMoodAgent",
             agent_type="advocate"
         )),
-        lastfm_client=lastfm_client
+        lastfm_client=lastfm_client,
+        gemini_client=gemini_client
     )
     
     discovery_agent = DiscoveryAgent(
@@ -536,10 +585,11 @@ async def create_recommendation_engine(
             agent_name="DiscoveryAgent",
             agent_type="advocate"
         )),
-        lastfm_client=lastfm_client
+        lastfm_client=lastfm_client,
+        gemini_client=gemini_client
     )
     
-    judge_agent = JudgeAgent()  # JudgeAgent has simpler initialization
+    judge_agent = JudgeAgent(llm_client=gemini_client)  # Pass Gemini client to JudgeAgent too
     
     # Create and return the engine
     engine = RecommendationEngine(

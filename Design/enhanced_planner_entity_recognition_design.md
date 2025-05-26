@@ -1,5 +1,85 @@
 # Enhanced PlannerAgent Entity Recognition System Design
 
+## Current PlannerAgent Functionality
+
+### What the PlannerAgent Does Now
+
+The PlannerAgent currently serves as the **strategic coordinator** for the entire music recommendation workflow. Here's its current 4-step process:
+
+#### Step 1: Query Analysis (`_analyze_user_query()`)
+```python
+# Current analysis extracts:
+{
+    "primary_goal": "brief description of main intent",
+    "complexity_level": "simple|medium|complex", 
+    "context_factors": ["activity", "mood", "setting"],
+    "mood_indicators": ["energy level", "emotional state"],
+    "genre_hints": ["explicit or implicit preferences"]
+}
+```
+
+#### Step 2: Agent Coordination (`_plan_agent_coordination()`)
+```python
+# Creates strategies for each agent:
+{
+    "genre_mood_agent": {
+        "focus_areas": ["area1", "area2"],
+        "energy_level": "low|medium|high",
+        "search_tags": ["tag1", "tag2"],
+        "mood_priority": "primary mood to target",
+        "genre_constraints": ["constraint1", "constraint2"]
+    },
+    "discovery_agent": {
+        "novelty_priority": "low|medium|high",
+        "similarity_base": "what to base similarity on",
+        "underground_bias": 0.0-1.0,
+        "discovery_scope": "narrow|medium|broad",
+        "exploration_strategy": "strategy description"
+    }
+}
+```
+
+#### Step 3: Evaluation Framework (`_create_evaluation_framework()`)
+```python
+# Defines criteria for JudgeAgent:
+{
+    "primary_weights": {
+        "confidence": 0.0-1.0,
+        "novelty_score": 0.0-1.0,
+        "quality_score": 0.0-1.0,
+        "concentration_friendliness_score": 0.0-1.0
+    },
+    "diversity_targets": {
+        "attributes": ["genres", "artist"],
+        "genres": 1-3,
+        "era": 1-3,
+        "energy": 1-2,
+        "artist": 2-3
+    },
+    "explanation_style": "detailed|concise|technical|casual"
+}
+```
+
+#### Step 4: Execution Monitoring (`_setup_execution_monitoring()`)
+- Sets up monitoring protocols for the workflow
+- Defines success criteria and fallback mechanisms
+
+### Current Limitations
+
+1. **Basic Entity Recognition**: Only extracts high-level concepts (mood, genre hints)
+2. **No Specific Entity Extraction**: Doesn't identify artists, tracks, albums, or activities
+3. **Limited Context Awareness**: No conversation history or session continuity
+4. **Simple Query Understanding**: Can't handle complex multi-faceted requests
+5. **No Reference Resolution**: Can't understand "like the last song" or "that artist"
+
+### Current Strengths (To Preserve)
+
+1. **Strategic Coordination**: Already orchestrates all agents effectively
+2. **LLM Integration**: Uses Gemini for intelligent analysis
+3. **Fallback Mechanisms**: Has regex-based fallbacks when LLM fails
+4. **Comprehensive Strategy**: Creates detailed plans for each agent
+5. **Error Handling**: Robust error recovery and logging
+
 ## Problem Statement
 
 The current BeatDebate system has fragmented query understanding with basic entity recognition scattered across agents. We need to centralize and enhance entity recognition in the PlannerAgent to create a single source of truth for query understanding that supports:
@@ -8,6 +88,149 @@ The current BeatDebate system has fragmented query understanding with basic enti
 2. **LLM-Based Recognition**: Sophisticated semantic understanding beyond regex patterns
 3. **Complex Query Handling**: Multi-faceted requests with contextual relationships
 4. **Conversation Context**: Session-aware understanding of previous recommendations and user preferences
+
+### Enhancement Strategy
+
+We will **build upon** the existing PlannerAgent functionality by:
+- **Enhancing** `_analyze_user_query()` to include comprehensive entity extraction
+- **Expanding** agent coordination strategies to use extracted entities
+- **Adding** conversation context management
+- **Preserving** all existing strategic coordination capabilities
+
+## Before vs After Comparison
+
+### Current Query Processing Example
+
+**User Query**: "I want something like The Beatles but more underground"
+
+**Current PlannerAgent Output**:
+```python
+{
+    "task_analysis": {
+        "primary_goal": "find similar music with discovery focus",
+        "complexity_level": "medium",
+        "context_factors": ["similarity", "discovery"],
+        "mood_indicators": ["unspecified"],
+        "genre_hints": ["rock", "pop"]  # inferred from Beatles
+    },
+    "coordination_strategy": {
+        "discovery_agent": {
+            "novelty_priority": "high",
+            "similarity_base": "genre and mood",  # generic
+            "underground_bias": 0.8
+        }
+    }
+}
+```
+
+**Problems**:
+- ❌ "The Beatles" not explicitly extracted as an artist entity
+- ❌ DiscoveryAgent has to re-parse the query to find "The Beatles"
+- ❌ No specific similarity targeting
+- ❌ Generic coordination strategy
+
+### Enhanced Query Processing Example
+
+**User Query**: "I want something like The Beatles but more underground"
+
+**Enhanced PlannerAgent Output**:
+```python
+{
+    "entities": {
+        "musical_entities": {
+            "artists": {
+                "similar_to": ["The Beatles"],
+                "primary": [],
+                "avoid": []
+            }
+        },
+        "preference_entities": {
+            "similarity_requests": [{
+                "type": "artist_similarity",
+                "target": "The Beatles",
+                "relationship": "similar_to",
+                "intensity": "moderate"
+            }],
+            "discovery_preferences": {
+                "novelty": ["underground"]
+            }
+        }
+    },
+    "coordination_strategy": {
+        "discovery_agent": {
+            "seed_artists": ["The Beatles"],
+            "similarity_targets": ["The Beatles"],
+            "underground_bias": 0.8,
+            "novelty_preference": "high",
+            "exploration_strategy": "beatles_influenced_underground"
+        },
+        "genre_mood_agent": {
+            "base_artist_analysis": "The Beatles",
+            "genre_constraints": ["rock", "pop", "psychedelic"],
+            "underground_filter": true
+        }
+    }
+}
+```
+
+**Benefits**:
+- ✅ "The Beatles" explicitly extracted and available to all agents
+- ✅ Specific similarity targeting with clear relationship
+- ✅ Underground preference clearly identified
+- ✅ Agents receive pre-processed, consistent entity information
+
+### Complex Query Example
+
+**User Query**: "More like the last song but jazzier and good for studying"
+
+**Current PlannerAgent**: 
+- ❌ Can't handle "the last song" reference
+- ❌ Would treat as a new, unrelated query
+- ❌ No session context awareness
+
+**Enhanced PlannerAgent**:
+```python
+{
+    "entities": {
+        "conversation_entities": {
+            "session_references": [{
+                "type": "previous_track",
+                "target": "last_recommended_track",
+                "reference": "the last song"
+            }]
+        },
+        "musical_entities": {
+            "genres": {
+                "fusion": ["jazz"]  # "jazzier" = add jazz elements
+            }
+        },
+        "contextual_entities": {
+            "activities": {
+                "mental": ["studying"]
+            }
+        }
+    },
+    "coordination_strategy": {
+        "discovery_agent": {
+            "seed_track": "session_track_id_123",
+            "style_direction": "jazz_influenced",
+            "activity_filter": "study_appropriate"
+        },
+        "genre_mood_agent": {
+            "base_track_analysis": "session_track_id_123",
+            "genre_shift": "towards_jazz",
+            "energy_level": "medium",  # appropriate for studying
+            "activity_context": "studying"
+        }
+    }
+}
+```
+
+**Benefits**:
+- ✅ Session reference resolved to specific track
+- ✅ Style modification ("jazzier") clearly identified
+- ✅ Activity context influences all agent strategies
+- ✅ Maintains continuity across conversation turns
 
 ## Design Goals
 

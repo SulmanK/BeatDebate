@@ -63,6 +63,18 @@ class UnifiedTrackMetadata:
     underground_score: Optional[float] = None  # 0-1, higher = more underground
     quality_score: Optional[float] = None      # 0-1, higher = better quality
     
+    # Recommendation-specific fields (added by recommendation service)
+    recommendation_score: Optional[float] = None  # Score from recommendation agent
+    recommendation_reason: Optional[str] = None   # Reason for recommendation
+    agent_source: Optional[str] = None            # Which agent recommended this track
+    
+    # Audio features (from Spotify)
+    audio_features: Optional[Dict[str, Any]] = None  # Spotify audio features
+    
+    # Source object references (for backward compatibility)
+    spotify_data: Optional[Any] = None  # Original Spotify track object
+    lastfm_data: Optional[Any] = None   # Original LastFM track object
+    
     def __post_init__(self):
         """Post-initialization processing."""
         # Normalize track and artist names
@@ -162,7 +174,13 @@ class UnifiedTrackMetadata:
             source=MetadataSource.UNIFIED,
             source_data={**self.source_data, **other.source_data},
             underground_score=self.underground_score or other.underground_score,
-            quality_score=self.quality_score or other.quality_score
+            quality_score=self.quality_score or other.quality_score,
+            recommendation_score=self.recommendation_score or other.recommendation_score,
+            recommendation_reason=self.recommendation_reason or other.recommendation_reason,
+            agent_source=self.agent_source or other.agent_source,
+            audio_features=self.audio_features or other.audio_features,
+            spotify_data=self.spotify_data or other.spotify_data,
+            lastfm_data=self.lastfm_data or other.lastfm_data
         )
         
         return merged
@@ -252,7 +270,13 @@ class UnifiedTrackMetadata:
             "source": self.source.value,
             "underground_score": self.underground_score,
             "quality_score": self.quality_score,
-            "last_updated": self.last_updated.isoformat()
+            "recommendation_score": self.recommendation_score,
+            "recommendation_reason": self.recommendation_reason,
+            "agent_source": self.agent_source,
+            "audio_features": self.audio_features,
+            "last_updated": self.last_updated.isoformat(),
+            "spotify_data": self.spotify_data,
+            "lastfm_data": self.lastfm_data
         }
 
 

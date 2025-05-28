@@ -1,4 +1,4 @@
-# Agents Directory Refactoring Design Document
+# Comprehensive Codebase Refactoring Design Document
 
 ## Problem Statement
 
@@ -6,303 +6,393 @@
 - Large, monolithic agent files (1000+ lines) that are difficult to maintain and test
 - Mixed responsibilities within single agent classes (query understanding, execution, evaluation)
 - Tightly coupled components making individual testing challenging
-- **SIGNIFICANT CODE DUPLICATION IDENTIFIED:**
-  - Two separate candidate generators (`EnhancedCandidateGenerator` vs `EnhancedDiscoveryGenerator`)
-  - Duplicate entity extraction methods across agents (`_extract_artists_from_*`, `_extract_*_genres`)
-  - Duplicate JSON parsing methods (`_parse_json_response`)
-  - Duplicate LLM calling methods (`_make_llm_call`)
-  - Duplicate query analysis patterns across `PlannerAgent`, `EntityRecognizer`, and `JudgeAgent`
+- **SIGNIFICANT CODE DUPLICATION ACROSS ENTIRE CODEBASE:**
+  - **Agents**: Two separate candidate generators, duplicate entity extraction, JSON parsing, LLM calls
+  - **API Clients**: Duplicate `_make_request` implementations in LastFM and Spotify clients
+  - **Rate Limiting**: Duplicate rate limiting logic across multiple clients
+  - **Error Handling**: Similar error handling patterns across API clients
+  - **Client Instantiation**: Repeated client creation patterns across agents
+  - **Metadata Models**: Similar track/artist metadata structures across clients
 
 **Desired State:**
-- Modular agent architecture with focused, smaller files (<500 lines each)
-- **UNIFIED SHARED COMPONENTS** eliminating duplication
-- Clear separation of concerns between planning, execution, and evaluation
-- Consolidated candidate generation with configurable strategies
-- Shared utility components for common operations
+- Modular architecture with focused, smaller files (<500 lines each)
+- **UNIFIED SHARED COMPONENTS** eliminating duplication across entire codebase
+- **CONSOLIDATED API LAYER** with shared HTTP client and rate limiting
+- **UNIFIED METADATA MODELS** across all services
+- **SHARED UTILITIES** for common operations (logging, caching, error handling)
+- Clear separation of concerns between all layers
 
 **Value Proposition:**
-- **Eliminate ~30% code duplication** through consolidation
-- Single source of truth for entity extraction, JSON parsing, and LLM calls
+- **Eliminate ~40% code duplication** through comprehensive consolidation
+- Single source of truth for HTTP requests, rate limiting, and error handling
+- Unified metadata models across all services
 - Faster development cycles through improved code organization
-- Easier testing of shared utilities
-- Reduced maintenance burden from duplicate logic
+- Easier testing of shared utilities and API components
+- Reduced maintenance burden from duplicate logic across entire codebase
 
-## Architecture Design
+## Comprehensive Architecture Design
 
 ### Overall Philosophy
-- `PlannerAgent` remains the central query understander and strategy coordinator
-- Advocate agents (`GenreMoodAgent`, `DiscoveryAgent`) execute strategies without duplicate query parsing
-- `JudgeAgent` evaluates based on Planner's output, not its own analysis
-- **SHARED COMPONENTS** handle all common operations
-- **UNIFIED CANDIDATE GENERATOR** with strategy-based configuration
+- **Layered Architecture**: Clear separation between agents, services, API clients, and utilities
+- **Shared Components**: All common functionality consolidated into reusable components
+- **Unified Interfaces**: Consistent interfaces across all API clients and services
+- **Single Responsibility**: Each component has a focused, well-defined purpose
 
-### Target Directory Structure
+### **EXPANDED: Target Directory Structure**
 
 ```
-src/agents/
-├── __init__.py                     # Exports main agent classes
-├── base_agent.py                   # BaseAgent class (unchanged)
-├── components/                     # Shared components
+src/
+├── api/                           # API Layer - Unified HTTP & External Services
 │   ├── __init__.py
-│   ├── unified_candidate_generator.py  # UNIFIED: Replaces both generators
-│   ├── quality_scorer.py               # MOVED: From root agents/
-│   ├── entity_extraction_utils.py      # NEW: Consolidated extraction methods
-│   ├── llm_utils.py                    # NEW: Shared LLM calling & JSON parsing
-│   └── query_analysis_utils.py         # NEW: Shared query analysis patterns
-├── planner/
-│   ├── __init__.py                 # Exports PlannerAgent
-│   ├── agent.py                    # PlannerAgent class (simplified)
-│   ├── query_understanding_engine.py   # QueryUnderstandingEngine
-│   └── entity_recognizer.py            # Enhanced entity recognizer (if kept)
-├── genre_mood/
-│   ├── __init__.py                 # Exports GenreMoodAgent
-│   ├── agent.py                    # GenreMoodAgent class (simplified)
-│   ├── mood_logic.py               # Mood mapping helpers (optional)
-│   └── tag_generator.py            # Search tag generation (optional)
-├── discovery/
-│   ├── __init__.py                 # Exports DiscoveryAgent
-│   ├── agent.py                    # DiscoveryAgent class (simplified)
-│   ├── similarity_explorer.py      # MultiHopSimilarityExplorer
-│   └── underground_detector.py     # UndergroundDetector
-└── judge/
-    ├── __init__.py                 # Exports JudgeAgent
-    ├── agent.py                    # JudgeAgent class (simplified)
-    ├── ranking_logic.py            # Scoring components
-    └── explainer.py                # ConversationalExplainer
+│   ├── base_client.py             # NEW: Base HTTP client with shared request logic
+│   ├── rate_limiter.py            # NEW: Unified rate limiting for all APIs
+│   ├── lastfm_client.py           # REFACTORED: Uses base_client
+│   ├── spotify_client.py          # REFACTORED: Uses base_client
+│   └── client_factory.py          # NEW: Factory for creating configured clients
+├── models/                        # Data Models & Schemas
+│   ├── __init__.py
+│   ├── metadata_models.py         # NEW: Unified track/artist metadata models
+│   ├── api_models.py             # NEW: API request/response models
+│   ├── agent_models.py           # EXISTING: Agent workflow models
+│   └── recommendation_models.py   # EXISTING: Recommendation result models
+├── services/                      # Business Logic Services
+│   ├── __init__.py
+│   ├── recommendation_engine.py   # REFACTORED: Uses unified components
+│   ├── smart_context_manager.py   # EXISTING: Context management service
+│   ├── cache_manager.py          # EXISTING: Caching service
+│   └── metadata_service.py       # NEW: Unified metadata operations
+├── agents/                        # Agent Layer - Simplified with Shared Components
+│   ├── __init__.py
+│   ├── base_agent.py             # EXISTING: Base agent class
+│   ├── components/               # Shared Agent Components
+│   │   ├── __init__.py
+│   │   ├── unified_candidate_generator.py  # UNIFIED: Replaces both generators
+│   │   ├── quality_scorer.py               # MOVED: From root agents/
+│   │   ├── entity_extraction_utils.py      # NEW: Consolidated extraction methods
+│   │   ├── llm_utils.py                    # NEW: Shared LLM calling & JSON parsing
+│   │   └── query_analysis_utils.py         # NEW: Shared query analysis patterns
+│   ├── planner/
+│   │   ├── __init__.py
+│   │   ├── agent.py                        # SIMPLIFIED: PlannerAgent class
+│   │   ├── query_understanding_engine.py   # MOVED: QueryUnderstandingEngine
+│   │   └── entity_recognizer.py            # CONDITIONAL: Enhanced entity recognizer
+│   ├── genre_mood/
+│   │   ├── __init__.py
+│   │   ├── agent.py                        # SIMPLIFIED: GenreMoodAgent class
+│   │   ├── mood_logic.py                   # OPTIONAL: Mood mapping helpers
+│   │   └── tag_generator.py                # OPTIONAL: Search tag generation
+│   ├── discovery/
+│   │   ├── __init__.py
+│   │   ├── agent.py                        # SIMPLIFIED: DiscoveryAgent class
+│   │   ├── similarity_explorer.py          # MOVED: MultiHopSimilarityExplorer
+│   │   └── underground_detector.py         # MOVED: UndergroundDetector
+│   └── judge/
+│       ├── __init__.py
+│       ├── agent.py                        # SIMPLIFIED: JudgeAgent class
+│       ├── ranking_logic.py                # MOVED: Scoring components
+│       └── explainer.py                    # MOVED: ConversationalExplainer
+└── utils/                         # Shared Utilities
+    ├── __init__.py
+    ├── logging_config.py          # EXISTING: Logging configuration
+    ├── http_utils.py              # NEW: HTTP utilities and error handling
+    ├── retry_utils.py             # NEW: Retry logic and exponential backoff
+    └── validation_utils.py        # NEW: Data validation and parsing utilities
 ```
 
-### **NEW: Unified Shared Components**
+## **NEW: API Layer Consolidation**
 
-#### 1. Unified Candidate Generator (`src/agents/components/unified_candidate_generator.py`)
-**Consolidates**: `EnhancedCandidateGenerator` + `EnhancedDiscoveryGenerator`
+### **1. Base HTTP Client (`src/api/base_client.py`)**
+**Consolidates**: Duplicate `_make_request` implementations
 
 ```python
-class UnifiedCandidateGenerator:
-    """Single generator with strategy-based configuration"""
+class BaseAPIClient:
+    """Base HTTP client with unified request handling, rate limiting, and error handling."""
     
-    def __init__(self, lastfm_client, strategy_config: str = "genre_mood"):
-        self.strategy_configs = {
-            'genre_mood': {
-                'primary_search': 40,
-                'similar_artists': 30, 
-                'genre_exploration': 20,
-                'underground_gems': 10
-            },
-            'discovery': {
-                'multi_hop_similarity': 50,
-                'underground_detection': 30,
-                'serendipitous_discovery': 20
-            }
-        }
-        self.strategy = strategy_config
+    def __init__(
+        self, 
+        base_url: str, 
+        rate_limiter: "RateLimiter",
+        timeout: int = 10
+    ):
+        self.base_url = base_url
+        self.rate_limiter = rate_limiter
+        self.timeout = timeout
+        self.session: Optional[aiohttp.ClientSession] = None
         
-    async def generate_candidate_pool(self, entities, intent_analysis, agent_type):
-        # Use appropriate strategy based on agent_type
-        config = self.strategy_configs[agent_type]
-        # Unified generation logic with configurable sources
+    async def _make_request(
+        self,
+        endpoint: str,
+        params: Optional[Dict[str, Any]] = None,
+        method: str = "GET",
+        retries: int = 3
+    ) -> Dict[str, Any]:
+        """Unified request method with rate limiting, retries, and error handling."""
+        
+    async def _handle_api_error(self, response: aiohttp.ClientResponse, endpoint: str):
+        """Unified API error handling across all clients."""
+        
+    async def _exponential_backoff(self, attempt: int, base_delay: float = 1.0):
+        """Unified exponential backoff strategy."""
 ```
 
-#### 2. Entity Extraction Utils (`src/agents/components/entity_extraction_utils.py`)
-**Consolidates**: Duplicate extraction methods from all agents
+### **2. Unified Rate Limiter (`src/api/rate_limiter.py`)**
+**Consolidates**: All rate limiting logic across clients
 
 ```python
-class EntityExtractionUtils:
-    @staticmethod
-    def extract_artists_from_entities(entities: Dict[str, Any]) -> List[str]:
-        """Single method for extracting artists from entities"""
+class UnifiedRateLimiter:
+    """Unified rate limiter supporting multiple rate limit strategies."""
+    
+    def __init__(self, calls_per_second: float = None, calls_per_hour: int = None):
+        self.calls_per_second = calls_per_second
+        self.calls_per_hour = calls_per_hour
+        # Unified rate limiting implementation
         
-    @staticmethod
-    def extract_artists_from_query(query: str) -> List[str]:
-        """Single method for extracting artists from query text"""
-        
-    @staticmethod
-    def extract_genres_from_entities(entities: Dict[str, Any]) -> List[str]:
-        """Single method for extracting genres from entities"""
-        
-    @staticmethod
-    def extract_target_genres(entities: Dict[str, Any]) -> List[str]:
-        """Single method for target genre extraction"""
+    async def wait_if_needed(self):
+        """Unified rate limiting logic for all API clients."""
 ```
 
-#### 3. LLM Utils (`src/agents/components/llm_utils.py`)
-**Consolidates**: All LLM calling and JSON parsing logic
+### **3. Refactored API Clients**
+Both `LastFmClient` and `SpotifyClient` will:
+- Inherit from `BaseAPIClient`
+- Remove duplicate `_make_request` implementations
+- Use unified rate limiting
+- Use shared error handling
+- Focus only on API-specific logic
+
+### **4. Client Factory (`src/api/client_factory.py`)**
+**Consolidates**: Repeated client instantiation patterns
 
 ```python
-class LLMUtils:
+class APIClientFactory:
+    """Factory for creating configured API clients."""
+    
     @staticmethod
-    async def make_llm_call(client, prompt: str, system_prompt: str = None) -> str:
-        """Single LLM calling method used by all agents"""
+    async def create_lastfm_client(api_key: str, rate_limit: float = 3.0) -> LastFmClient:
+        """Create configured Last.fm client."""
         
-    @staticmethod
-    def parse_json_response(response: str) -> Dict[str, Any]:
-        """Single JSON parsing method with robust error handling"""
-        
-    @staticmethod
-    def clean_json_string(json_str: str) -> str:
-        """Shared JSON cleaning utilities"""
+    @staticmethod  
+    async def create_spotify_client(
+        client_id: str, 
+        client_secret: str, 
+        rate_limit: int = 50
+    ) -> SpotifyClient:
+        """Create configured Spotify client."""
 ```
 
-#### 4. Query Analysis Utils (`src/agents/components/query_analysis_utils.py`)
-**Consolidates**: Common query analysis patterns
+## **NEW: Models Layer Consolidation**
+
+### **1. Unified Metadata Models (`src/models/metadata_models.py`)**
+**Consolidates**: Similar track/artist metadata across clients
 
 ```python
-class QueryAnalysisUtils:
-    @staticmethod
-    def initialize_query_patterns() -> Dict[str, Dict[str, List[str]]]:
-        """Single source for all query patterns"""
-        
-    @staticmethod
-    def extract_primary_intent(prompt: str) -> str:
-        """Unified intent extraction logic"""
-        
-    @staticmethod
-    def identify_activity(prompt: str) -> Optional[str]:
-        """Unified activity identification"""
+@dataclass
+class UnifiedTrackMetadata:
+    """Unified track metadata across all services."""
+    name: str
+    artist: str
+    album: Optional[str] = None
+    # Common fields across LastFM and Spotify
+    # Service-specific data in 'source_data' field
+    
+@dataclass  
+class UnifiedArtistMetadata:
+    """Unified artist metadata across all services."""
+    name: str
+    # Common fields with service-specific extensions
 ```
 
-### **Component Responsibilities (Updated)**
+### **2. API Models (`src/models/api_models.py`)**
+**NEW**: Request/response models for API operations
 
-#### 1. Planner Agent (`src/agents/planner/`)
-- **Primary Role**: Query understanding and strategy generation
-- **Simplified**: Remove duplicate JSON parsing, use shared LLM utils
-- **Key Components**:
-  - `agent.py`: Main PlannerAgent class with strategy coordination (< 400 lines)
-  - `query_understanding_engine.py`: QueryUnderstandingEngine using shared utils
-  - `entity_recognizer.py`: Enhanced entity recognizer (if kept as fallback)
+```python
+class SearchRequest(BaseModel):
+    """Unified search request model."""
+    
+class MetadataRequest(BaseModel):
+    """Unified metadata request model."""
+```
 
-#### 2. Genre/Mood Agent (`src/agents/genre_mood/`)
-- **Primary Role**: Genre and mood-based recommendations
-- **Simplified**: Use unified candidate generator, shared extraction utils
-- **Key Components**:
-  - `agent.py`: Main GenreMoodAgent class (< 300 lines)
-  - `mood_logic.py`: Mood mapping helpers (optional split)
-  - `tag_generator.py`: Search tag generation (optional split)
+## **NEW: Services Layer Enhancement**
 
-#### 3. Discovery Agent (`src/agents/discovery/`)
-- **Primary Role**: Similarity-based discovery and underground recommendations
-- **Simplified**: Use unified candidate generator, remove duplicate extraction
-- **Key Components**:
-  - `agent.py`: Main DiscoveryAgent class (< 400 lines)
-  - `similarity_explorer.py`: MultiHopSimilarityExplorer
-  - `underground_detector.py`: UndergroundDetector
+### **1. Metadata Service (`src/services/metadata_service.py`)**
+**NEW**: Unified metadata operations across all clients
 
-#### 4. Judge Agent (`src/agents/judge/`)
-- **Primary Role**: Evaluation and final selection
-- **Simplified**: Remove internal prompt analysis, use shared query utils
-- **Key Components**:
-  - `agent.py`: Main JudgeAgent class (< 300 lines)
-  - `ranking_logic.py`: Scoring components
-  - `explainer.py`: ConversationalExplainer
+```python
+class MetadataService:
+    """Unified service for metadata operations across all APIs."""
+    
+    def __init__(self, lastfm_client: LastFmClient, spotify_client: SpotifyClient):
+        self.lastfm_client = lastfm_client
+        self.spotify_client = spotify_client
+        
+    async def get_unified_track_metadata(
+        self, 
+        artist: str, 
+        track: str
+    ) -> UnifiedTrackMetadata:
+        """Get unified track metadata from multiple sources."""
+        
+    async def search_tracks_unified(self, query: str) -> List[UnifiedTrackMetadata]:
+        """Search tracks across multiple services with unified results."""
+```
 
-#### 5. Shared Components (`src/agents/components/`)
-- **Primary Role**: All shared functionality
-- **Key Components**:
-  - `unified_candidate_generator.py`: Single configurable generator
-  - `quality_scorer.py`: Comprehensive quality scoring (moved from root)
-  - `entity_extraction_utils.py`: All entity extraction methods
-  - `llm_utils.py`: LLM calling and JSON parsing
-  - `query_analysis_utils.py`: Query analysis patterns
+## **NEW: Utils Layer Expansion**
 
-### **Duplication Elimination Strategy**
+### **1. HTTP Utils (`src/utils/http_utils.py`)**
+**NEW**: Shared HTTP utilities
 
-#### Phase 1: Create Shared Components
-1. **Create unified candidate generator** combining both existing generators
-2. **Extract common LLM utilities** from all agents
-3. **Consolidate entity extraction methods** into shared utils
-4. **Consolidate query analysis patterns** into shared utils
+```python
+class HTTPUtils:
+    @staticmethod
+    def build_query_params(params: Dict[str, Any]) -> str:
+        """Build query parameters with proper encoding."""
+        
+    @staticmethod
+    def parse_api_error(response: aiohttp.ClientResponse) -> Dict[str, Any]:
+        """Parse API error responses with consistent format."""
+```
 
-#### Phase 2: Agent Simplification
-1. **Remove duplicate methods** from individual agents
-2. **Replace with shared component calls**
-3. **Simplify agent logic** to focus on core responsibilities
-4. **Update imports** to use shared components
+### **2. Retry Utils (`src/utils/retry_utils.py`)**
+**NEW**: Shared retry logic
 
-#### Phase 3: Validation & Testing
-1. **Verify functionality preservation** through comprehensive testing
-2. **Performance validation** to ensure no degradation
-3. **Integration testing** of shared components
+```python
+class RetryUtils:
+    @staticmethod
+    async def exponential_backoff(
+        attempt: int, 
+        base_delay: float = 1.0, 
+        max_delay: float = 60.0
+    ):
+        """Exponential backoff with jitter."""
+        
+    @staticmethod
+    def should_retry(exception: Exception, attempt: int, max_attempts: int) -> bool:
+        """Determine if operation should be retried."""
+```
 
-### **File Size Reduction Targets**
+## **EXPANDED: Agent Layer Consolidation**
+
+### **Updated: Agent Simplification Strategy**
+
+#### **Remove Client Instantiation from Agents**
+All agents currently create their own `LastFmClient` instances:
+```python
+# REMOVE THIS PATTERN from all agents:
+from ..api.lastfm_client import LastFmClient
+async with LastFmClient(api_key=self.lastfm.api_key) as client:
+```
+
+**Replace with**:
+```python
+# Agents receive configured clients via dependency injection
+# Use MetadataService for unified operations
+```
+
+#### **Eliminate Rate Limit Duplication**
+All agents currently store: `self.lastfm_rate_limit = lastfm_client.rate_limiter.calls_per_second`
+
+**Replace with**: Shared configuration through `MetadataService`
+
+## **EXPANDED: Duplication Elimination Strategy**
+
+### **Phase 1: Core Infrastructure**
+1. **Create base HTTP client** with unified request handling
+2. **Create unified rate limiter** for all APIs  
+3. **Create unified metadata models** replacing service-specific ones
+4. **Create client factory** for standardized client creation
+
+### **Phase 2: API Layer Refactoring**
+1. **Refactor LastFM client** to use base client
+2. **Refactor Spotify client** to use base client
+3. **Remove duplicate HTTP and error handling code**
+4. **Implement unified rate limiting**
+
+### **Phase 3: Services Layer Enhancement**
+1. **Create metadata service** for unified operations
+2. **Update recommendation engine** to use unified services
+3. **Integrate with existing cache manager** and context manager
+
+### **Phase 4: Agent Layer Simplification**
+1. **Remove client instantiation** from agents
+2. **Replace with dependency injection** of configured services
+3. **Implement unified candidate generator**
+4. **Consolidate utility methods** into shared components
+
+### **Phase 5: Utils Layer Completion**
+1. **Extract HTTP utilities** from API clients
+2. **Extract retry logic** into shared utilities
+3. **Create validation utilities** for consistent data handling
+
+## **EXPANDED: File Size Reduction Targets**
 
 | Component | Current Size | Target Size | Reduction |
 |-----------|-------------|-------------|-----------|
+| **Agents Layer** |
 | PlannerAgent | 1276 lines | <400 lines | 68% |
 | JudgeAgent | 1361 lines | <300 lines | 78% |
 | DiscoveryAgent | 1316 lines | <400 lines | 70% |
 | GenreMoodAgent | 985 lines | <300 lines | 70% |
+| **API Layer** |
+| LastFmClient | 630 lines | <400 lines | 37% |
+| SpotifyClient | 511 lines | <350 lines | 32% |
+| **Services Layer** |
+| RecommendationEngine | 809 lines | <500 lines | 38% |
 
-**Total Reduction**: ~70% in main agent files + elimination of duplicate utility code
+**Total Reduction**: ~60% in main files + elimination of duplicate utility code across entire codebase
 
-### Technical Considerations
+## **EXPANDED: Implementation Plan**
 
-#### Backward Compatibility
-- Maintain existing API interfaces during transition
-- Gradual migration to shared components
-- Test compatibility with existing service layer
-
-#### Import Management
-- Clear import structure for shared components
-- Avoid circular dependencies through careful layering
-- Use relative imports within agent subdirectories
-
-#### Performance Considerations
-- Shared components should not introduce performance overhead
-- Lazy loading for optional components
-- Efficient caching strategies for repeated operations
-
-## Implementation Plan
-
-### Step 1: Create Shared Components Foundation
+### **Step 1: Core Infrastructure (API Layer Foundation)**
 ```bash
-mkdir -p src/agents/components
+mkdir -p src/api src/models src/utils
 ```
-- Create `unified_candidate_generator.py`
-- Create `entity_extraction_utils.py`  
-- Create `llm_utils.py`
-- Create `query_analysis_utils.py`
+- Create `src/api/base_client.py` with unified HTTP handling
+- Create `src/api/rate_limiter.py` with unified rate limiting
+- Create `src/models/metadata_models.py` with unified data models
+- Create `src/utils/http_utils.py` and `src/utils/retry_utils.py`
 
-### Step 2: Extract and Consolidate Utilities
-1. **LLM Utils**: Extract all `_make_llm_call` and `_parse_json_response` methods
-2. **Entity Utils**: Consolidate all `_extract_*` methods
-3. **Query Utils**: Consolidate query analysis patterns
-4. **Unified Generator**: Merge both candidate generators
+### **Step 2: API Layer Consolidation**
+1. **Extract common patterns** from existing API clients
+2. **Refactor LastFM and Spotify clients** to use base infrastructure
+3. **Create client factory** for standardized instantiation
+4. **Test API compatibility** with existing functionality
 
-### Step 3: Simplify Agent Classes
-1. Replace duplicate methods with shared component calls
-2. Remove internal utility methods
-3. Focus agent logic on core responsibilities
+### **Step 3: Services Layer Enhancement**
+1. **Create metadata service** with unified operations
+2. **Update recommendation engine** to use new services
+3. **Integrate with cache manager** for performance
+4. **Test service layer compatibility**
 
-### Step 4: Create Agent Subdirectories
-1. Move simplified agents to subdirectories
-2. Extract remaining helper components
-3. Update all imports
+### **Step 4: Agent Layer Refactoring (As Previously Planned)**
+1. **Create shared agent components**
+2. **Simplify agent classes** removing duplicate utilities
+3. **Move agents to subdirectories** with focused responsibilities
+4. **Update all imports** and dependencies
 
-### Step 5: Integration & Testing
-1. Update `recommendation_engine.py` imports
-2. Run comprehensive test suite
-3. Performance validation
+### **Step 5: Integration & Validation**
+1. **Update all import statements** across codebase
+2. **Run comprehensive test suite** for all layers
+3. **Performance validation** ensuring no degradation
+4. **Integration testing** of complete workflow
 
-## Success Criteria
+## **EXPANDED: Success Criteria**
 
-1. **Duplication Elimination**: No duplicate utility methods across agents
-2. **File Size Reduction**: All main agent files <500 lines
-3. **Shared Component Adoption**: All agents use unified components
-4. **Functionality Preservation**: All existing capabilities maintained
-6. **Performance Maintenance**: No significant performance degradation
+1. **API Layer**: No duplicate HTTP handling or rate limiting logic
+2. **Models Layer**: Unified metadata models across all services  
+3. **Services Layer**: Consolidated business logic with clear interfaces
+4. **Agents Layer**: No duplicate utility methods, <500 lines per file
+5. **Utils Layer**: Shared utilities for all common operations
+6. **Functionality Preservation**: All existing capabilities maintained
+7. **Performance Maintenance**: No significant performance degradation
+8. **Test Compatibility**: All existing tests pass with minimal changes
 
-## Risk Mitigation
+## **EXPANDED: Expected Impact**
 
-1. **Shared Component Bugs**: Comprehensive testing of shared utilities
-2. **Import Conflicts**: Careful dependency management and testing
-3. **Functionality Loss**: Step-by-step validation during migration
-4. **Performance Issues**: Benchmarking before/after changes
+- **Code Reduction**: ~5000 lines of duplicate code eliminated across entire codebase
+- **Maintenance**: Single source of truth for HTTP, rate limiting, metadata, and common operations
+- **Testing**: All shared components can be tested in isolation
+- **Development**: Consistent patterns across all layers, easier to add new features
+- **Architecture**: Clean separation of concerns with comprehensive shared utilities
+- **Performance**: Optimized HTTP handling and caching through unified components
 
-## Expected Impact
-
-- **Code Reduction**: ~3000 lines of duplicate code eliminated
-- **Maintenance**: Single source of truth for common operations
-- **Testing**: Shared components can be tested in isolation
-- **Development**: Easier to add new agents using shared components
-- **Architecture**: Clean separation of concerns with shared utilities
-
-This refactoring will transform the agents from monolithic, duplicated code into a clean, modular architecture with significant reduction in complexity and maintenance burden. 
+This comprehensive refactoring will transform the entire codebase from having significant duplication across all layers into a clean, modular architecture with substantial reduction in complexity and maintenance burden throughout the system. 

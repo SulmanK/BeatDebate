@@ -5,14 +5,15 @@ Provides access to Spotify's database for audio features and preview URLs.
 Used as secondary data source for BeatDebate.
 """
 
-import asyncio
 import base64
 import time
 from typing import Dict, List, Optional, Any
 from dataclasses import dataclass
 
-import aiohttp
 import structlog
+
+from .base_client import BaseAPIClient
+from .rate_limiter import UnifiedRateLimiter
 
 logger = structlog.get_logger(__name__)
 
@@ -48,31 +49,12 @@ class AudioFeatures:
     mode: int
 
 
-class SpotifyRateLimiter:
-    """Rate limiter for Spotify API calls."""
-    
-    def __init__(self, calls_per_hour: int = 50):
-        self.calls_per_hour = calls_per_hour
-        self.min_interval = 3600.0 / calls_per_hour  # seconds between calls
-        self.last_call = 0.0
-        
-    async def wait_if_needed(self) -> None:
-        """Wait if necessary to respect rate limits."""
-        now = time.time()
-        time_since_last = now - self.last_call
-        
-        if time_since_last < self.min_interval:
-            wait_time = self.min_interval - time_since_last
-            await asyncio.sleep(wait_time)
-            
-        self.last_call = time.time()
-
-
-class SpotifyClient:
+class SpotifyClient(BaseAPIClient):
     """
-    Spotify Web API client with authentication and rate limiting.
+    Spotify Web API client with unified authentication and rate limiting.
     
     Focuses on audio features and preview URLs for BeatDebate.
+    Inherits from BaseAPIClient for consistent HTTP handling across all API clients.
     """
     
     BASE_URL = "https://api.spotify.com/v1"
@@ -82,7 +64,7 @@ class SpotifyClient:
         self, 
         client_id: str, 
         client_secret: str,
-        rate_limit: int = 50
+        rate_limiter: Optional[UnifiedRateLimiter] = None
     ):
         """
         Initialize Spotify client.
@@ -90,26 +72,50 @@ class SpotifyClient:
         Args:
             client_id: Spotify client ID
             client_secret: Spotify client secret
-            rate_limit: Requests per hour (default: 50)
+            rate_limiter: Rate limiter instance (optional, will create default if not provided)
         """
+        # Create default rate limiter if not provided
+        if rate_limiter is None:
+            rate_limiter = UnifiedRateLimiter.for_spotify()
+        
+        # Initialize base client
+        super().__init__(
+            base_url=self.BASE_URL,
+            rate_limiter=rate_limiter,
+            timeout=10,
+            service_name="Spotify"
+        )
+        
         self.client_id = client_id
         self.client_secret = client_secret
-        self.rate_limiter = SpotifyRateLimiter(rate_limit)
-        self.session: Optional[aiohttp.ClientSession] = None
         self.access_token: Optional[str] = None
         self.token_expires_at: float = 0.0
         
+        self.logger.info("Spotify client initialized")
+    
+    def _extract_api_error(self, data: Dict[str, Any]) -> Optional[str]:
+        """
+        Extract Spotify API error information from response data.
+        
+        Args:
+            data: Parsed response data
+            
+        Returns:
+            Error message if found, None otherwise
+        """
+        if "error" in data:
+            error_info = data["error"]
+            if isinstance(error_info, dict):
+                return error_info.get("message", f"Error {error_info.get('status', 'unknown')}")
+            return str(error_info)
+        return None
+    
     async def __aenter__(self):
-        """Async context manager entry."""
-        self.session = aiohttp.ClientSession()
+        """Async context manager entry with authentication."""
+        await super().__aenter__()
         await self._authenticate()
         return self
-        
-    async def __aexit__(self, exc_type, exc_val, exc_tb):
-        """Async context manager exit."""
-        if self.session:
-            await self.session.close()
-            
+    
     async def _authenticate(self) -> None:
         """Authenticate with Spotify API using client credentials flow."""
         if not self.session:
@@ -130,8 +136,7 @@ class SpotifyClient:
             async with self.session.post(
                 self.AUTH_URL,
                 headers=headers,
-                data=data,
-                timeout=aiohttp.ClientTimeout(total=10)
+                data=data
             ) as response:
                 if response.status == 200:
                     token_data = await response.json()
@@ -139,13 +144,13 @@ class SpotifyClient:
                     expires_in = token_data.get("expires_in", 3600)
                     self.token_expires_at = time.time() + expires_in - 60  # 1min buffer
                     
-                    logger.info(
+                    self.logger.info(
                         "Spotify authentication successful",
                         expires_in=expires_in
                     )
                 else:
                     error_data = await response.json()
-                    logger.error(
+                    self.logger.error(
                         "Spotify authentication failed",
                         status=response.status,
                         error=error_data
@@ -153,15 +158,15 @@ class SpotifyClient:
                     raise Exception(f"Spotify auth failed: {error_data}")
                     
         except Exception as e:
-            logger.error("Spotify authentication error", error=str(e))
+            self.logger.error("Spotify authentication error", error=str(e))
             raise
             
     async def _ensure_valid_token(self) -> None:
         """Ensure we have a valid access token."""
         if not self.access_token or time.time() >= self.token_expires_at:
             await self._authenticate()
-            
-    async def _make_request(
+    
+    async def _make_spotify_request(
         self,
         endpoint: str,
         params: Optional[Dict[str, Any]] = None,
@@ -178,90 +183,19 @@ class SpotifyClient:
         Returns:
             API response data
         """
-        if not self.session:
-            raise RuntimeError("Client not initialized. Use async context manager.")
-            
         await self._ensure_valid_token()
-        await self.rate_limiter.wait_if_needed()
         
         headers = {
             "Authorization": f"Bearer {self.access_token}",
             "Content-Type": "application/json"
         }
         
-        url = f"{self.BASE_URL}/{endpoint.lstrip('/')}"
-        
-        for attempt in range(retries + 1):
-            try:
-                async with self.session.get(
-                    url,
-                    headers=headers,
-                    params=params or {},
-                    timeout=aiohttp.ClientTimeout(total=10)
-                ) as response:
-                    if response.status == 200:
-                        data = await response.json()
-                        logger.debug(
-                            "Spotify API request successful",
-                            endpoint=endpoint,
-                            params=params
-                        )
-                        return data
-                        
-                    elif response.status == 401:  # Unauthorized
-                        logger.warning("Spotify token expired, re-authenticating")
-                        await self._authenticate()
-                        # Don't count this as a retry attempt
-                        continue
-                        
-                    elif response.status == 429:  # Rate limited
-                        retry_after = int(response.headers.get('Retry-After', 1))
-                        logger.warning(
-                            "Rate limited by Spotify",
-                            retry_after=retry_after,
-                            attempt=attempt
-                        )
-                        await asyncio.sleep(retry_after)
-                        continue
-                        
-                    elif response.status == 404:  # Not found
-                        logger.debug(
-                            "Spotify resource not found",
-                            endpoint=endpoint,
-                            params=params
-                        )
-                        return {}
-                        
-                    else:
-                        logger.warning(
-                            "Spotify API request failed",
-                            status=response.status,
-                            endpoint=endpoint
-                        )
-                        response.raise_for_status()
-                        
-            except asyncio.TimeoutError:
-                logger.warning(
-                    "Spotify API timeout",
-                    attempt=attempt,
-                    endpoint=endpoint
-                )
-                if attempt == retries:
-                    raise
-                await asyncio.sleep(2 ** attempt)
-                
-            except Exception as e:
-                logger.error(
-                    "Spotify API request failed",
-                    error=str(e),
-                    attempt=attempt,
-                    endpoint=endpoint
-                )
-                if attempt == retries:
-                    raise
-                await asyncio.sleep(2 ** attempt)
-                
-        raise Exception(f"Failed to complete Spotify request after {retries + 1} attempts")
+        return await self._make_request(
+            endpoint=endpoint,
+            params=params,
+            headers=headers,
+            retries=retries
+        )
     
     async def search_track(
         self,
@@ -282,7 +216,7 @@ class SpotifyClient:
         """
         try:
             query = f"artist:{artist} track:{track}"
-            data = await self._make_request(
+            data = await self._make_spotify_request(
                 "search",
                 {
                     "q": query,
@@ -308,7 +242,7 @@ class SpotifyClient:
             return None
             
         except Exception as e:
-            logger.error(
+            self.logger.error(
                 "Spotify track search failed",
                 artist=artist,
                 track=track,
@@ -324,14 +258,11 @@ class SpotifyClient:
             track_id: Spotify track ID
             
         Returns:
-            Track details or None
+            Spotify track data or None if not found
         """
         try:
-            data = await self._make_request(f"tracks/{track_id}")
+            data = await self._make_spotify_request(f"tracks/{track_id}")
             
-            if not data:
-                return None
-                
             return SpotifyTrack(
                 id=data["id"],
                 name=data["name"],
@@ -344,7 +275,7 @@ class SpotifyClient:
             )
             
         except Exception as e:
-            logger.error(
+            self.logger.error(
                 "Get Spotify track failed",
                 track_id=track_id,
                 error=str(e)
@@ -359,32 +290,32 @@ class SpotifyClient:
             track_id: Spotify track ID
             
         Returns:
-            Audio features or None
+            Audio features or None if not found
         """
         try:
-            data = await self._make_request(f"audio-features/{track_id}")
+            data = await self._make_spotify_request(f"audio-features/{track_id}")
             
-            if not data or "id" not in data:
+            if not data or data.get("id") is None:
                 return None
                 
             return AudioFeatures(
                 track_id=data["id"],
-                danceability=data.get("danceability", 0.0),
-                energy=data.get("energy", 0.0),
-                valence=data.get("valence", 0.0),
-                acousticness=data.get("acousticness", 0.0),
-                instrumentalness=data.get("instrumentalness", 0.0),
-                speechiness=data.get("speechiness", 0.0),
-                liveness=data.get("liveness", 0.0),
-                loudness=data.get("loudness", 0.0),
-                tempo=data.get("tempo", 0.0),
-                time_signature=data.get("time_signature", 4),
-                key=data.get("key", 0),
-                mode=data.get("mode", 0)
+                danceability=data["danceability"],
+                energy=data["energy"],
+                valence=data["valence"],
+                acousticness=data["acousticness"],
+                instrumentalness=data["instrumentalness"],
+                speechiness=data["speechiness"],
+                liveness=data["liveness"],
+                loudness=data["loudness"],
+                tempo=data["tempo"],
+                time_signature=data["time_signature"],
+                key=data["key"],
+                mode=data["mode"]
             )
             
         except Exception as e:
-            logger.error(
+            self.logger.error(
                 "Get audio features failed",
                 track_id=track_id,
                 error=str(e)
@@ -396,60 +327,62 @@ class SpotifyClient:
         track_ids: List[str]
     ) -> Dict[str, AudioFeatures]:
         """
-        Get audio features for multiple tracks (batch request).
+        Get audio features for multiple tracks.
         
         Args:
-            track_ids: List of Spotify track IDs
+            track_ids: List of Spotify track IDs (max 100)
             
         Returns:
             Dictionary mapping track IDs to audio features
         """
-        features = {}
-        
-        # Process in batches of 100 (Spotify limit)
-        for i in range(0, len(track_ids), 100):
-            batch = track_ids[i:i + 100]
+        if not track_ids:
+            return {}
             
-            try:
-                data = await self._make_request(
-                    "audio-features",
-                    {"ids": ",".join(batch)}
-                )
-                
-                if "audio_features" in data:
-                    for feature_data in data["audio_features"]:
-                        if feature_data and "id" in feature_data:
-                            features[feature_data["id"]] = AudioFeatures(
-                                track_id=feature_data["id"],
-                                danceability=feature_data.get("danceability", 0.0),
-                                energy=feature_data.get("energy", 0.0),
-                                valence=feature_data.get("valence", 0.0),
-                                acousticness=feature_data.get("acousticness", 0.0),
-                                instrumentalness=feature_data.get("instrumentalness", 0.0),
-                                speechiness=feature_data.get("speechiness", 0.0),
-                                liveness=feature_data.get("liveness", 0.0),
-                                loudness=feature_data.get("loudness", 0.0),
-                                tempo=feature_data.get("tempo", 0.0),
-                                time_signature=feature_data.get("time_signature", 4),
-                                key=feature_data.get("key", 0),
-                                mode=feature_data.get("mode", 0)
-                            )
-                            
-            except Exception as e:
-                logger.error(
-                    "Batch audio features request failed",
-                    batch_size=len(batch),
-                    error=str(e)
-                )
-                continue
-                
-        logger.info(
-            "Audio features batch completed",
-            requested=len(track_ids),
-            retrieved=len(features)
-        )
+        # Spotify API allows max 100 IDs per request
+        track_ids = track_ids[:100]
         
-        return features
+        try:
+            data = await self._make_spotify_request(
+                "audio-features",
+                {"ids": ",".join(track_ids)}
+            )
+            
+            features_dict = {}
+            if "audio_features" in data:
+                for features_data in data["audio_features"]:
+                    if features_data:  # Can be None for tracks without features
+                        features = AudioFeatures(
+                            track_id=features_data["id"],
+                            danceability=features_data["danceability"],
+                            energy=features_data["energy"],
+                            valence=features_data["valence"],
+                            acousticness=features_data["acousticness"],
+                            instrumentalness=features_data["instrumentalness"],
+                            speechiness=features_data["speechiness"],
+                            liveness=features_data["liveness"],
+                            loudness=features_data["loudness"],
+                            tempo=features_data["tempo"],
+                            time_signature=features_data["time_signature"],
+                            key=features_data["key"],
+                            mode=features_data["mode"]
+                        )
+                        features_dict[features.track_id] = features
+                        
+            self.logger.info(
+                "Multiple audio features retrieved",
+                requested=len(track_ids),
+                retrieved=len(features_dict)
+            )
+            
+            return features_dict
+            
+        except Exception as e:
+            self.logger.error(
+                "Get multiple audio features failed",
+                track_count=len(track_ids),
+                error=str(e)
+            )
+            return {}
     
     async def search_tracks(
         self,
@@ -469,7 +402,7 @@ class SpotifyClient:
             List of matching tracks
         """
         try:
-            data = await self._make_request(
+            data = await self._make_spotify_request(
                 "search",
                 {
                     "q": query,
@@ -494,7 +427,7 @@ class SpotifyClient:
                     )
                     tracks.append(track)
                     
-            logger.info(
+            self.logger.info(
                 "Spotify search completed",
                 query=query,
                 results_count=len(tracks)
@@ -503,9 +436,22 @@ class SpotifyClient:
             return tracks
             
         except Exception as e:
-            logger.error(
+            self.logger.error(
                 "Spotify search failed",
                 query=query,
                 error=str(e)
             )
-            return [] 
+            return []
+
+
+# Legacy compatibility - maintain the old SpotifyRateLimiter class for backward compatibility
+class SpotifyRateLimiter:
+    """Legacy Spotify rate limiter for backward compatibility."""
+    
+    def __init__(self, calls_per_hour: int = 50):
+        self.calls_per_hour = calls_per_hour
+        self._unified_limiter = UnifiedRateLimiter.for_spotify(calls_per_hour)
+        
+    async def wait_if_needed(self) -> None:
+        """Wait if necessary to respect rate limits."""
+        await self._unified_limiter.wait_if_needed() 

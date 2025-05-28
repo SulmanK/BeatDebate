@@ -10,9 +10,15 @@ from typing import Optional, Dict, Any
 
 import structlog
 
-from .base_client import BaseAPIClient
 from .rate_limiter import UnifiedRateLimiter
-from ..models.agent_models import SystemConfig
+
+# Optional import for SystemConfig - handle case where it doesn't exist yet
+try:
+    from ..models.agent_models import SystemConfig
+except ImportError:
+    # Create a placeholder for SystemConfig if not available
+    class SystemConfig:
+        pass
 
 logger = structlog.get_logger(__name__)
 
@@ -67,7 +73,9 @@ class APIClientFactory:
         # Get or create rate limiter
         rate_limiter_key = f"lastfm_{rate_limit}"
         if rate_limiter_key not in self._rate_limiters:
-            self._rate_limiters[rate_limiter_key] = UnifiedRateLimiter.for_lastfm(rate_limit)
+            self._rate_limiters[rate_limiter_key] = (
+                UnifiedRateLimiter.for_lastfm(rate_limit)
+            )
         
         # Import here to avoid circular imports
         from .lastfm_client import LastFmClient
@@ -97,7 +105,8 @@ class APIClientFactory:
         
         Args:
             client_id: Spotify client ID (defaults to env var or system config)
-            client_secret: Spotify client secret (defaults to env var or system config)
+            client_secret: Spotify client secret (defaults to env var or 
+                system config)
             rate_limit: Requests per hour (defaults to system config)
             
         Returns:
@@ -114,7 +123,9 @@ class APIClientFactory:
         # Get or create rate limiter
         rate_limiter_key = f"spotify_{rate_limit}"
         if rate_limiter_key not in self._rate_limiters:
-            self._rate_limiters[rate_limiter_key] = UnifiedRateLimiter.for_spotify(rate_limit)
+            self._rate_limiters[rate_limiter_key] = (
+                UnifiedRateLimiter.for_spotify(rate_limit)
+            )
         
         # Import here to avoid circular imports
         from .spotify_client import SpotifyClient
@@ -149,7 +160,9 @@ class APIClientFactory:
         
         rate_limiter_key = f"gemini_{calls_per_minute}"
         if rate_limiter_key not in self._rate_limiters:
-            self._rate_limiters[rate_limiter_key] = UnifiedRateLimiter.for_gemini(calls_per_minute)
+            self._rate_limiters[rate_limiter_key] = (
+                UnifiedRateLimiter.for_gemini(calls_per_minute)
+            )
         
         return self._rate_limiters[rate_limiter_key]
     
@@ -176,37 +189,43 @@ class APIClientFactory:
     # Configuration resolution methods
     def _get_lastfm_api_key(self) -> Optional[str]:
         """Get Last.fm API key from configuration or environment."""
-        if self.system_config and hasattr(self.system_config, 'lastfm_api_key'):
+        if (self.system_config and 
+            hasattr(self.system_config, 'lastfm_api_key')):
             return self.system_config.lastfm_api_key
         return os.getenv('LASTFM_API_KEY')
     
     def _get_lastfm_rate_limit(self) -> float:
         """Get Last.fm rate limit from configuration."""
-        if self.system_config and hasattr(self.system_config, 'lastfm_rate_limit'):
+        if (self.system_config and 
+            hasattr(self.system_config, 'lastfm_rate_limit')):
             return self.system_config.lastfm_rate_limit
         return 3.0  # Default
     
     def _get_spotify_client_id(self) -> Optional[str]:
         """Get Spotify client ID from configuration or environment."""
-        if self.system_config and hasattr(self.system_config, 'spotify_client_id'):
+        if (self.system_config and 
+            hasattr(self.system_config, 'spotify_client_id')):
             return self.system_config.spotify_client_id
         return os.getenv('SPOTIFY_CLIENT_ID')
     
     def _get_spotify_client_secret(self) -> Optional[str]:
         """Get Spotify client secret from configuration or environment."""
-        if self.system_config and hasattr(self.system_config, 'spotify_client_secret'):
+        if (self.system_config and 
+            hasattr(self.system_config, 'spotify_client_secret')):
             return self.system_config.spotify_client_secret
         return os.getenv('SPOTIFY_CLIENT_SECRET')
     
     def _get_spotify_rate_limit(self) -> int:
         """Get Spotify rate limit from configuration."""
-        if self.system_config and hasattr(self.system_config, 'spotify_rate_limit'):
+        if (self.system_config and 
+            hasattr(self.system_config, 'spotify_rate_limit')):
             return self.system_config.spotify_rate_limit
         return 50  # Default
     
     def _get_gemini_rate_limit(self) -> int:
         """Get Gemini rate limit from configuration."""
-        if self.system_config and hasattr(self.system_config, 'gemini_rate_limit'):
+        if (self.system_config and 
+            hasattr(self.system_config, 'gemini_rate_limit')):
             return self.system_config.gemini_rate_limit
         return 15  # Default
 
@@ -215,7 +234,9 @@ class APIClientFactory:
 _global_factory: Optional[APIClientFactory] = None
 
 
-def get_client_factory(system_config: Optional[SystemConfig] = None) -> APIClientFactory:
+def get_client_factory(
+    system_config: Optional[SystemConfig] = None
+) -> APIClientFactory:
     """
     Get global client factory instance.
     
@@ -256,4 +277,6 @@ async def create_spotify_client(
 ) -> "SpotifyClient":
     """Create Spotify client using global factory."""
     factory = get_client_factory()
-    return await factory.create_spotify_client(client_id, client_secret, rate_limit) 
+    return await factory.create_spotify_client(
+        client_id, client_secret, rate_limit
+    ) 

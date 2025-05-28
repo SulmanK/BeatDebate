@@ -5,15 +5,13 @@ Provides access to Last.fm's music database with rate limiting and caching.
 Focus on indie/underground track metadata and discovery.
 """
 
-import asyncio
-import time
 from typing import Dict, List, Optional, Any
 from dataclasses import dataclass
-from functools import wraps
 
-import aiohttp
 import structlog
-from pydantic import BaseModel, Field
+
+from .base_client import BaseAPIClient
+from .rate_limiter import UnifiedRateLimiter
 
 logger = structlog.get_logger(__name__)
 
@@ -57,67 +55,72 @@ class ArtistMetadata:
             self.similar_artists = []
 
 
-class RateLimiter:
-    """Rate limiter for API calls."""
-    
-    def __init__(self, calls_per_second: float = 3.0):
-        self.calls_per_second = calls_per_second
-        self.min_interval = 1.0 / calls_per_second
-        self.last_call = 0.0
-        
-    async def wait_if_needed(self) -> None:
-        """Wait if necessary to respect rate limits."""
-        now = time.time()
-        time_since_last = now - self.last_call
-        
-        if time_since_last < self.min_interval:
-            wait_time = self.min_interval - time_since_last
-            await asyncio.sleep(wait_time)
-            
-        self.last_call = time.time()
-
-
-class LastFmClient:
+class LastFmClient(BaseAPIClient):
     """
-    Last.fm API client with rate limiting and error handling.
+    Last.fm API client with unified rate limiting and error handling.
     
     Focused on music discovery and metadata extraction for indie/underground tracks.
+    Inherits from BaseAPIClient for consistent HTTP handling across all API clients.
     """
     
     BASE_URL = "https://ws.audioscrobbler.com/2.0/"
     
-    def __init__(self, api_key: str, shared_secret: Optional[str] = None, rate_limit: float = 3.0):
+    def __init__(
+        self, 
+        api_key: str, 
+        shared_secret: Optional[str] = None, 
+        rate_limiter: Optional[UnifiedRateLimiter] = None
+    ):
         """
         Initialize Last.fm client.
         
         Args:
             api_key: Last.fm API key (required)
             shared_secret: Last.fm shared secret (optional, for user auth features)
-            rate_limit: Requests per second (default: 3.0)
+            rate_limiter: Rate limiter instance (optional, will create default if not provided)
         """
+        # Create default rate limiter if not provided
+        if rate_limiter is None:
+            rate_limiter = UnifiedRateLimiter.for_lastfm()
+        
+        # Initialize base client
+        super().__init__(
+            base_url=self.BASE_URL,
+            rate_limiter=rate_limiter,
+            timeout=10,
+            service_name="LastFM"
+        )
+        
         self.api_key = api_key
         self.shared_secret = shared_secret
-        self.rate_limiter = RateLimiter(rate_limit)
-        self.session: Optional[aiohttp.ClientSession] = None
         
-    async def __aenter__(self):
-        """Async context manager entry."""
-        self.session = aiohttp.ClientSession()
-        return self
+        self.logger.info(
+            "Last.fm client initialized",
+            has_shared_secret=bool(shared_secret)
+        )
+    
+    def _extract_api_error(self, data: Dict[str, Any]) -> Optional[str]:
+        """
+        Extract Last.fm API error information from response data.
         
-    async def __aexit__(self, exc_type, exc_val, exc_tb):
-        """Async context manager exit."""
-        if self.session:
-            await self.session.close()
+        Args:
+            data: Parsed response data
             
-    async def _make_request(
+        Returns:
+            Error message if found, None otherwise
+        """
+        if "error" in data:
+            return data.get("message", f"Error {data['error']}")
+        return None
+    
+    async def _make_lastfm_request(
         self, 
         method: str, 
-        params: Dict[str, Any],
+        params: Optional[Dict[str, Any]] = None,
         retries: int = 3
     ) -> Dict[str, Any]:
         """
-        Make rate-limited request to Last.fm API.
+        Make Last.fm API request with automatic parameter injection.
         
         Args:
             method: Last.fm API method
@@ -127,85 +130,21 @@ class LastFmClient:
         Returns:
             API response data
         """
-        if not self.session:
-            raise RuntimeError("Client not initialized. Use async context manager.")
-            
-        await self.rate_limiter.wait_if_needed()
-        
-        # Build request parameters
+        # Build request parameters with Last.fm specifics
         request_params = {
             "method": method,
             "api_key": self.api_key,
             "format": "json",
-            **params
+            **(params or {})
         }
         
-        for attempt in range(retries + 1):
-            try:
-                async with self.session.get(
-                    self.BASE_URL, 
-                    params=request_params,
-                    timeout=aiohttp.ClientTimeout(total=10)
-                ) as response:
-                    if response.status == 200:
-                        data = await response.json()
-                        
-                        if "error" in data:
-                            logger.error(
-                                "Last.fm API error",
-                                error=data["error"],
-                                message=data.get("message", "Unknown error"),
-                                method=method
-                            )
-                            raise Exception(f"Last.fm API error: {data.get('message', 'Unknown')}")
-                            
-                        logger.debug(
-                            "Last.fm API request successful",
-                            method=method,
-                            params=params
-                        )
-                        return data
-                        
-                    elif response.status == 429:  # Rate limited
-                        wait_time = 2 ** attempt  # Exponential backoff
-                        logger.warning(
-                            "Rate limited by Last.fm",
-                            attempt=attempt,
-                            wait_time=wait_time
-                        )
-                        await asyncio.sleep(wait_time)
-                        continue
-                        
-                    else:
-                        logger.warning(
-                            "Last.fm API request failed",
-                            status=response.status,
-                            method=method
-                        )
-                        response.raise_for_status()
-                        
-            except asyncio.TimeoutError:
-                logger.warning(
-                    "Last.fm API timeout",
-                    attempt=attempt,
-                    method=method
-                )
-                if attempt == retries:
-                    raise
-                await asyncio.sleep(2 ** attempt)
-                
-            except Exception as e:
-                logger.error(
-                    "Last.fm API request failed",
-                    error=str(e),
-                    method=method,
-                    attempt=attempt
-                )
-                if attempt == retries:
-                    raise
-                await asyncio.sleep(2 ** attempt)
-                
-        raise Exception(f"Failed to complete Last.fm request after {retries + 1} attempts")
+        # Use base client's _make_request with empty endpoint (Last.fm uses query params)
+        return await self._make_request(
+            endpoint="",  # Last.fm uses base URL with query params
+            params=request_params,
+            method="GET",
+            retries=retries
+        )
     
     async def search_tracks(
         self, 
@@ -225,7 +164,7 @@ class LastFmClient:
             List of track metadata
         """
         try:
-            data = await self._make_request(
+            data = await self._make_lastfm_request(
                 "track.search",
                 {
                     "track": query,
@@ -253,7 +192,7 @@ class LastFmClient:
                     )
                     tracks.append(track)
                     
-            logger.info(
+            self.logger.info(
                 "Track search completed",
                 query=query,
                 results_count=len(tracks),
@@ -263,7 +202,7 @@ class LastFmClient:
             return tracks
             
         except Exception as e:
-            logger.error(
+            self.logger.error(
                 "Track search failed",
                 query=query,
                 error=str(e)
@@ -292,7 +231,7 @@ class LastFmClient:
             if mbid:
                 params["mbid"] = mbid
                 
-            data = await self._make_request("track.getInfo", params)
+            data = await self._make_lastfm_request("track.getInfo", params)
             
             if "track" not in data:
                 return None
@@ -328,7 +267,7 @@ class LastFmClient:
             )
             
         except Exception as e:
-            logger.error(
+            self.logger.error(
                 "Get track info failed",
                 artist=artist,
                 track=track,
@@ -354,7 +293,7 @@ class LastFmClient:
             List of similar tracks
         """
         try:
-            data = await self._make_request(
+            data = await self._make_lastfm_request(
                 "track.getSimilar",
                 {
                     "artist": artist,
@@ -378,7 +317,7 @@ class LastFmClient:
                     )
                     tracks.append(track)
                     
-            logger.info(
+            self.logger.info(
                 "Similar tracks search completed",
                 seed_artist=artist,
                 seed_track=track,
@@ -388,7 +327,7 @@ class LastFmClient:
             return tracks
             
         except Exception as e:
-            logger.error(
+            self.logger.error(
                 "Similar tracks search failed",
                 artist=artist,
                 track=track,
@@ -407,7 +346,7 @@ class LastFmClient:
             Artist metadata or None if not found
         """
         try:
-            data = await self._make_request(
+            data = await self._make_lastfm_request(
                 "artist.getInfo",
                 {"artist": artist}
             )
@@ -445,7 +384,7 @@ class LastFmClient:
             )
             
         except Exception as e:
-            logger.error(
+            self.logger.error(
                 "Get artist info failed",
                 artist=artist,
                 error=str(e)
@@ -471,7 +410,7 @@ class LastFmClient:
         
         for tag in tags:
             try:
-                data = await self._make_request(
+                data = await self._make_lastfm_request(
                     "tag.getTopTracks",
                     {
                         "tag": tag,
@@ -495,14 +434,14 @@ class LastFmClient:
                         tracks.append(track)
                         
             except Exception as e:
-                logger.warning(
+                self.logger.warning(
                     "Tag search failed for tag",
                     tag=tag,
                     error=str(e)
                 )
                 continue
                 
-        logger.info(
+        self.logger.info(
             "Tag search completed",
             tags=tags,
             results_count=len(tracks)
@@ -526,7 +465,7 @@ class LastFmClient:
             List of top tracks for the artist
         """
         try:
-            data = await self._make_request(
+            data = await self._make_lastfm_request(
                 "artist.getTopTracks",
                 {
                     "artist": artist,
@@ -551,7 +490,7 @@ class LastFmClient:
                     )
                     tracks.append(track)
                     
-            logger.info(
+            self.logger.info(
                 "Artist top tracks search completed",
                 artist=artist,
                 results_count=len(tracks)
@@ -560,7 +499,7 @@ class LastFmClient:
             return tracks
             
         except Exception as e:
-            logger.error(
+            self.logger.error(
                 "Artist top tracks search failed",
                 artist=artist,
                 error=str(e)
@@ -585,7 +524,7 @@ class LastFmClient:
             List of artist metadata
         """
         try:
-            data = await self._make_request(
+            data = await self._make_lastfm_request(
                 "artist.search",
                 {
                     "artist": query,
@@ -612,7 +551,7 @@ class LastFmClient:
                     )
                     artists.append(artist)
                     
-            logger.info(
+            self.logger.info(
                 "Artist search completed",
                 query=query,
                 results_count=len(artists),
@@ -622,9 +561,22 @@ class LastFmClient:
             return artists
             
         except Exception as e:
-            logger.error(
+            self.logger.error(
                 "Artist search failed",
                 query=query,
                 error=str(e)
             )
-            return [] 
+            return []
+
+
+# Legacy compatibility - maintain the old RateLimiter class for backward compatibility
+class RateLimiter:
+    """Legacy rate limiter for backward compatibility."""
+    
+    def __init__(self, calls_per_second: float = 3.0):
+        self.calls_per_second = calls_per_second
+        self._unified_limiter = UnifiedRateLimiter.for_lastfm(calls_per_second)
+        
+    async def wait_if_needed(self) -> None:
+        """Wait if necessary to respect rate limits."""
+        await self._unified_limiter.wait_if_needed() 

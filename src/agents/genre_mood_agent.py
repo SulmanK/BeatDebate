@@ -1,8 +1,8 @@
 """
 GenreMoodAgent for BeatDebate Multi-Agent Music Recommendation System
 
-Advocate agent specializing in genre and mood-based music discovery
-using Last.fm API for tag-based search and mood matching.
+Enhanced advocate agent specializing in genre and mood-based music discovery
+using Last.fm API with 100→20 candidate generation and quality scoring.
 """
 
 import asyncio
@@ -16,6 +16,8 @@ from ..models.agent_models import (
 )
 from ..models.recommendation_models import TrackRecommendation
 from ..api.lastfm_client import LastFmClient
+from .enhanced_candidate_generator import EnhancedCandidateGenerator
+from .quality_scorer import ComprehensiveQualityScorer
 
 logger = structlog.get_logger(__name__)
 
@@ -31,9 +33,11 @@ class GenreMoodAgent(BaseAgent):
     - Popular and trending track identification
     """
     
-    def __init__(self, config: AgentConfig, lastfm_client: LastFmClient, gemini_client=None):
+    def __init__(self, config: AgentConfig, lastfm_client: LastFmClient, 
+                 gemini_client=None):
         """
-        Initialize GenreMoodAgent with Last.fm and Gemini clients.
+        Initialize Enhanced GenreMoodAgent with candidate generation and 
+        quality scoring.
         
         Args:
             config: Agent configuration
@@ -46,74 +50,101 @@ class GenreMoodAgent(BaseAgent):
         self.lastfm_rate_limit = lastfm_client.rate_limiter.calls_per_second
         self.llm_client = gemini_client
         
+        # Enhanced components for 100→20 pipeline
+        self.candidate_generator = EnhancedCandidateGenerator(lastfm_client)
+        self.quality_scorer = ComprehensiveQualityScorer()
+        
+        # Quality filtering thresholds
+        self.quality_threshold = 0.6  # Minimum quality score
+        self.target_recommendations = 20  # Final recommendation count
+        
         # Mood and energy mappings
         self.mood_tag_mappings = self._initialize_mood_mappings()
         self.energy_level_mappings = self._initialize_energy_mappings()
         self.genre_tag_mappings = self._initialize_genre_mappings()
         
-        self.logger.info("GenreMoodAgent initialized with Last.fm integration")
+        self.logger.info(
+            "Enhanced GenreMoodAgent initialized with 100→20 pipeline"
+        )
     
     async def process(self, state: MusicRecommenderState) -> MusicRecommenderState:
         """
-        Generate genre and mood-based music recommendations.
+        Generate enhanced genre and mood-based music recommendations using
+        100→20 candidate generation and quality scoring pipeline.
         
         Args:
-            state: Current workflow state with planning strategy
+            state: Current workflow state with entities and intent analysis
             
         Returns:
-            Updated state with genre/mood recommendations
+            Updated state with high-quality genre/mood recommendations
         """
-        self.add_reasoning_step("Starting genre and mood-based music discovery")
+        self.add_reasoning_step(
+            "Starting enhanced genre/mood discovery with 100→20 pipeline"
+        )
         
         try:
-            # Extract strategy for this agent
-            strategy = self.extract_strategy_for_agent(state.planning_strategy or {})
-            self.log_strategy_application(strategy, "Extracting genre/mood strategy")
+            # Extract entities and intent from PlannerAgent
+            entities = state.entities or {}
+            intent_analysis = state.intent_analysis or {}
             
-            # Step 1: Analyze mood and genre requirements
-            mood_analysis = await self._analyze_mood_requirements(
-                state.user_query, strategy
-            )
-            self.add_reasoning_step(f"Mood analysis: {mood_analysis['primary_mood']}")
-            
-            # Step 2: Generate search tags based on strategy and analysis
-            search_tags = self._generate_search_tags(strategy, mood_analysis)
-            self.add_reasoning_step(f"Generated search tags: {search_tags}")
-            
-            # Step 3: Search for tracks using multiple tag combinations
-            candidate_tracks = await self._search_tracks_by_tags(search_tags)
-            self.add_reasoning_step(f"Found {len(candidate_tracks)} candidate tracks")
-            
-            # Step 4: Filter and rank tracks based on mood/genre fit
-            filtered_tracks = await self._filter_and_rank_tracks(
-                candidate_tracks, mood_analysis, strategy
-            )
-            self.add_reasoning_step(f"Filtered to {len(filtered_tracks)} quality tracks")
-            
-            # Step 5: Create recommendations with reasoning
-            recommendations = await self._create_recommendations(
-                filtered_tracks, mood_analysis, strategy
+            self.add_reasoning_step(
+                f"Using entities: {len(entities)} categories, "
+                f"intent: {intent_analysis.get('primary_intent', 'discovery')}"
             )
             
-            # Update state
-            state.genre_mood_recommendations = [rec.model_dump() for rec in recommendations]
+            # Step 1: Generate 100 candidate tracks from multiple sources
+            candidate_pool = await self.candidate_generator.generate_candidate_pool(
+                entities, intent_analysis, agent_type="genre_mood"
+            )
+            self.add_reasoning_step(
+                f"Generated {len(candidate_pool)} candidates from multiple sources"
+            )
+            
+            # Step 2: Apply comprehensive quality scoring to all candidates
+            scored_candidates = await self._score_all_candidates(
+                candidate_pool, entities, intent_analysis
+            )
+            self.add_reasoning_step(
+                f"Quality scored {len(scored_candidates)} candidates"
+            )
+            
+            # Step 3: Filter by quality threshold and apply advanced filtering
+            high_quality_tracks = await self._apply_advanced_filtering(
+                scored_candidates, entities, intent_analysis
+            )
+            self.add_reasoning_step(
+                f"Filtered to {len(high_quality_tracks)} high-quality tracks"
+            )
+            
+            # Step 4: Select top 20 with diversity and create recommendations
+            final_tracks = high_quality_tracks[:self.target_recommendations]
+            recommendations = await self._create_enhanced_recommendations(
+                final_tracks, entities, intent_analysis
+            )
+            
+            # Update state with enhanced recommendations
+            state.genre_mood_recommendations = [
+                rec.model_dump() for rec in recommendations
+            ]
             state.reasoning_log.append(
-                f"GenreMoodAgent: Generated {len(recommendations)} "
-                f"mood-based recommendations for '{mood_analysis['primary_mood']}'"
+                f"Enhanced GenreMoodAgent: Generated {len(recommendations)} "
+                f"high-quality recommendations using 100→20 pipeline"
             )
             
             self.logger.info(
-                "Genre/mood recommendations completed",
+                "Enhanced genre/mood recommendations completed",
                 recommendation_count=len(recommendations),
-                primary_mood=mood_analysis['primary_mood'],
-                search_tags=search_tags[:3]  # Log first 3 tags
+                candidate_pool_size=len(candidate_pool),
+                quality_filtered=len(high_quality_tracks),
+                primary_intent=intent_analysis.get('primary_intent', 'discovery')
             )
             
             return state
             
         except Exception as e:
-            self.logger.error("Genre/mood recommendation failed", error=str(e))
-            state.reasoning_log.append(f"GenreMoodAgent ERROR: {str(e)}")
+            self.logger.error("Enhanced genre/mood recommendation failed", 
+                            error=str(e))
+            state.reasoning_log.append(f"Enhanced GenreMoodAgent ERROR: {str(e)}")
             return state
     
     async def _analyze_mood_requirements(
@@ -317,6 +348,315 @@ class GenreMoodAgent(BaseAgent):
                 unique_tracks.append(track)
         
         return unique_tracks[:50]  # Limit to 50 candidates
+    
+    async def _score_all_candidates(
+        self, 
+        candidate_pool: List[Dict[str, Any]], 
+        entities: Dict[str, Any], 
+        intent_analysis: Dict[str, Any]
+    ) -> List[Dict[str, Any]]:
+        """
+        Apply comprehensive quality scoring to all candidate tracks.
+        
+        Args:
+            candidate_pool: List of candidate tracks from generator
+            entities: Extracted entities from PlannerAgent
+            intent_analysis: Intent analysis from PlannerAgent
+            
+        Returns:
+            List of tracks with quality scores and breakdowns
+        """
+        scored_candidates = []
+        
+        for track in candidate_pool:
+            try:
+                # Calculate comprehensive quality score
+                quality_result = await self.quality_scorer.calculate_track_quality(
+                    track, entities, intent_analysis
+                )
+                
+                # Add quality information to track
+                track['quality_score'] = quality_result['total_quality_score']
+                track['quality_breakdown'] = quality_result['quality_breakdown']
+                track['quality_tier'] = quality_result['quality_tier']
+                
+                scored_candidates.append(track)
+                
+            except Exception as e:
+                self.logger.warning(
+                    "Quality scoring failed for track",
+                    track=f"{track.get('artist', 'Unknown')} - {track.get('name', 'Unknown')}",
+                    error=str(e)
+                )
+                # Add track with default quality score
+                track['quality_score'] = 0.5
+                track['quality_breakdown'] = {}
+                track['quality_tier'] = 'medium'
+                scored_candidates.append(track)
+        
+        return scored_candidates
+    
+    async def _apply_advanced_filtering(
+        self, 
+        scored_candidates: List[Dict[str, Any]], 
+        entities: Dict[str, Any], 
+        intent_analysis: Dict[str, Any]
+    ) -> List[Dict[str, Any]]:
+        """
+        Apply advanced filtering to ensure quality and diversity.
+        
+        Args:
+            scored_candidates: Tracks with quality scores
+            entities: Extracted entities
+            intent_analysis: Intent analysis
+            
+        Returns:
+            Filtered and ranked high-quality tracks
+        """
+        # Step 1: Filter by quality threshold
+        high_quality_tracks = [
+            track for track in scored_candidates 
+            if track['quality_score'] >= self.quality_threshold
+        ]
+        
+        # Step 2: Sort by quality score
+        high_quality_tracks.sort(
+            key=lambda x: x['quality_score'], 
+            reverse=True
+        )
+        
+        # Step 3: Ensure source diversity
+        diverse_tracks = self._ensure_source_diversity(high_quality_tracks)
+        
+        # Step 4: Remove tracks that are too similar
+        final_tracks = self._remove_similar_tracks(diverse_tracks)
+        
+        return final_tracks
+    
+    def _ensure_source_diversity(
+        self, tracks: List[Dict[str, Any]]
+    ) -> List[Dict[str, Any]]:
+        """Ensure balanced representation from different sources."""
+        source_counts = {}
+        diverse_tracks = []
+        max_per_source = 8  # Maximum tracks per source
+        
+        for track in tracks:
+            source = track.get('source', 'unknown')
+            current_count = source_counts.get(source, 0)
+            
+            if current_count < max_per_source:
+                diverse_tracks.append(track)
+                source_counts[source] = current_count + 1
+        
+        return diverse_tracks
+    
+    def _remove_similar_tracks(
+        self, tracks: List[Dict[str, Any]]
+    ) -> List[Dict[str, Any]]:
+        """Remove tracks that are too similar to each other."""
+        unique_tracks = []
+        seen_artists = set()
+        
+        for track in tracks:
+            artist = track.get('artist', '').lower().strip()
+            
+            # Allow max 2 tracks per artist
+            artist_count = sum(1 for t in unique_tracks if t.get('artist', '').lower().strip() == artist)
+            
+            if artist_count < 2:
+                unique_tracks.append(track)
+                seen_artists.add(artist)
+        
+        return unique_tracks
+    
+    async def _create_enhanced_recommendations(
+        self,
+        tracks: List[Dict[str, Any]],
+        entities: Dict[str, Any],
+        intent_analysis: Dict[str, Any]
+    ) -> List[TrackRecommendation]:
+        """
+        Create enhanced TrackRecommendation objects with quality reasoning.
+        
+        Args:
+            tracks: High-quality filtered tracks
+            entities: Extracted entities
+            intent_analysis: Intent analysis
+            
+        Returns:
+            List of enhanced TrackRecommendation objects
+        """
+        recommendations = []
+        
+        for i, track in enumerate(tracks):
+            try:
+                # Generate enhanced reasoning that includes quality factors
+                reasoning = self._generate_enhanced_reasoning(
+                    track, entities, intent_analysis, i + 1
+                )
+                
+                # Extract genres and tags
+                genres = self._extract_genres_from_entities(track, entities)
+                tags = self._extract_tags_from_entities(track, entities, intent_analysis)
+                
+                # Create recommendation with quality information
+                recommendation = TrackRecommendation(
+                    rank=i + 1,
+                    artist=track.get('artist', 'Unknown Artist'),
+                    title=track.get('name', 'Unknown Title'),
+                    id=track.get('mbid') or f"enhanced_{track.get('artist', 'unknown')}_{track.get('name', 'unknown')}".replace(' ', '_').lower(),
+                    source="enhanced_lastfm",
+                    track_url=track.get('url', ''),
+                    genres=genres,
+                    moods=tags,
+                    quality_score=track.get('quality_score', 0.5),
+                    novelty_score=0.3,  # GenreMoodAgent focuses on established genres
+                    concentration_friendliness_score=self._calculate_enhanced_confidence(track),
+                    confidence=self._calculate_enhanced_confidence(track),
+                    advocate_source_agent="GenreMoodAgent",  # CRITICAL: Set the source agent
+                    additional_scores={
+                        'source': track.get('source', 'unknown'),
+                        'quality_tier': track.get('quality_tier', 'medium'),
+                        'listeners': track.get('listeners', 0),
+                        'playcount': track.get('playcount', 0)
+                    },
+                    raw_source_data={
+                        'quality_breakdown': track.get('quality_breakdown', {}),
+                        'agent': 'enhanced_genre_mood'
+                    }
+                )
+                
+                recommendations.append(recommendation)
+                
+            except Exception as e:
+                self.logger.warning(
+                    "Enhanced recommendation creation failed",
+                    track=f"{track.get('artist', 'Unknown')} - {track.get('name', 'Unknown')}",
+                    error=str(e)
+                )
+                continue
+        
+        return recommendations
+    
+    def _generate_enhanced_reasoning(
+        self,
+        track: Dict[str, Any],
+        entities: Dict[str, Any],
+        intent_analysis: Dict[str, Any],
+        rank: int
+    ) -> str:
+        """Generate enhanced reasoning that includes quality factors."""
+        quality_score = track.get('quality_score', 0.5)
+        quality_tier = track.get('quality_tier', 'medium')
+        source = track.get('source', 'unknown')
+        
+        # Base reasoning
+        reasoning_parts = [
+            f"Ranked #{rank} with {quality_tier} quality (score: {quality_score:.2f})"
+        ]
+        
+        # Add source information
+        source_descriptions = {
+            'primary_search': 'found through targeted genre/mood search',
+            'similar_artists': 'discovered via artist similarity',
+            'genre_exploration': 'found through genre exploration',
+            'underground_gems': 'discovered as underground gem'
+        }
+        
+        if source in source_descriptions:
+            reasoning_parts.append(source_descriptions[source])
+        
+        # Add quality breakdown if available
+        quality_breakdown = track.get('quality_breakdown', {})
+        if quality_breakdown:
+            strong_factors = [
+                factor for factor, score in quality_breakdown.items() 
+                if score > 0.7
+            ]
+            if strong_factors:
+                reasoning_parts.append(
+                    f"Strong in: {', '.join(strong_factors[:2])}"
+                )
+        
+        # Add intent alignment
+        primary_intent = intent_analysis.get('primary_intent', 'discovery')
+        reasoning_parts.append(f"Matches {primary_intent} intent")
+        
+        return ". ".join(reasoning_parts) + "."
+    
+    def _extract_genres_from_entities(
+        self, track: Dict[str, Any], entities: Dict[str, Any]
+    ) -> List[str]:
+        """Extract genres based on entities and track source."""
+        genres = []
+        
+        # Add genres from entities
+        musical_entities = entities.get("musical_entities", {})
+        entity_genres = musical_entities.get("genres", {}).get("primary", [])
+        genres.extend(entity_genres)
+        
+        # Add genre from search context
+        search_term = track.get('search_term', '')
+        exploration_tag = track.get('exploration_tag', '')
+        
+        if search_term:
+            genres.append(search_term)
+        if exploration_tag:
+            genres.append(exploration_tag)
+        
+        # Remove duplicates and return
+        return list(set(genres))[:3]  # Limit to 3 genres
+    
+    def _extract_tags_from_entities(
+        self, 
+        track: Dict[str, Any], 
+        entities: Dict[str, Any], 
+        intent_analysis: Dict[str, Any]
+    ) -> List[str]:
+        """Extract tags based on entities and intent."""
+        tags = []
+        
+        # Add mood tags
+        contextual_entities = entities.get("contextual_entities", {})
+        moods = contextual_entities.get("moods", {})
+        for mood_category in moods.values():
+            tags.extend(mood_category)
+        
+        # Add activity tags
+        activities = contextual_entities.get("activities", {})
+        for activity_category in activities.values():
+            tags.extend(activity_category)
+        
+        # Add intent-based tags
+        primary_intent = intent_analysis.get('primary_intent', '')
+        if primary_intent:
+            tags.append(primary_intent)
+        
+        # Add quality tier as tag
+        quality_tier = track.get('quality_tier', '')
+        if quality_tier:
+            tags.append(f"{quality_tier}_quality")
+        
+        # Remove duplicates and return
+        return list(set(tags))[:5]  # Limit to 5 tags
+    
+    def _calculate_enhanced_confidence(self, track: Dict[str, Any]) -> float:
+        """Calculate confidence based on quality score and metadata."""
+        quality_score = track.get('quality_score', 0.5)
+        
+        # Base confidence from quality score
+        confidence = quality_score
+        
+        # Boost confidence for tracks with good metadata
+        if track.get('url'):
+            confidence += 0.1
+        if track.get('listeners', 0) > 1000:
+            confidence += 0.1
+        if track.get('source') in ['primary_search', 'similar_artists']:
+            confidence += 0.05
+        
+        return min(1.0, confidence)
     
     async def _filter_and_rank_tracks(
         self, 

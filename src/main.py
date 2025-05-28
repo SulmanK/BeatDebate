@@ -18,18 +18,26 @@ import uvicorn
 from fastapi import FastAPI
 from dotenv import load_dotenv
 
-from .api.backend import app as fastapi_app
-from .ui.chat_interface import create_chat_interface
-
 # Load environment variables from .env file
 load_dotenv()
 
-# Configure logging
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+# Setup comprehensive logging FIRST - before importing modules that use it
+from .utils.logging_config import setup_logging, get_logger
+
+log_level = os.getenv("LOG_LEVEL", "INFO")
+enable_console = os.getenv("ENABLE_CONSOLE_LOGGING", "true").lower() == "true"
+
+setup_logging(
+    log_dir="logs",
+    log_level=log_level,
+    enable_console=enable_console
 )
-logger = logging.getLogger(__name__)
+
+logger = get_logger(__name__)
+
+# Now import modules that may use logging
+from .api.backend import app as fastapi_app
+from .ui.chat_interface import create_chat_interface
 
 
 class BeatDebateApp:

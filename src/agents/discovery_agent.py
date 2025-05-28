@@ -19,24 +19,26 @@ from ..models.agent_models import (
 )
 from ..models.recommendation_models import TrackRecommendation
 from ..api.lastfm_client import LastFmClient
+from .enhanced_discovery_generator import EnhancedDiscoveryGenerator
+from .quality_scorer import ComprehensiveQualityScorer
 
 logger = structlog.get_logger(__name__)
 
 
 class DiscoveryAgent(BaseAgent):
     """
-    Advocate agent for similarity-based music discovery and underground exploration.
+    Enhanced advocate agent for multi-hop similarity discovery and underground exploration.
     
     Specializes in:
-    - Artist similarity-based recommendations
-    - Underground and lesser-known track discovery
-    - Exploration beyond mainstream music
-    - Novelty and diversity optimization
+    - Multi-hop artist similarity networks (2-3 degrees)
+    - Underground and hidden gem detection
+    - Serendipitous discovery beyond mainstream music
+    - Quality-filtered novelty optimization
     """
     
     def __init__(self, config: AgentConfig, lastfm_client: LastFmClient, gemini_client=None):
         """
-        Initialize DiscoveryAgent with Last.fm and Gemini clients.
+        Initialize Enhanced DiscoveryAgent with multi-hop similarity and underground detection.
         
         Args:
             config: Agent configuration
@@ -49,78 +51,98 @@ class DiscoveryAgent(BaseAgent):
         self.lastfm_rate_limit = lastfm_client.rate_limiter.calls_per_second
         self.llm_client = gemini_client
         
-        # Discovery strategies and seed artists
+        # Enhanced components for 100→20 pipeline
+        self.enhanced_generator = EnhancedDiscoveryGenerator(lastfm_client)
+        self.quality_scorer = ComprehensiveQualityScorer()
+        
+        # Quality filtering thresholds
+        self.quality_threshold = 0.5  # Minimum quality score for discovery
+        self.target_recommendations = 20  # Final recommendation count
+        
+        # Discovery strategies and seed artists (legacy support)
         self.discovery_strategies = self._initialize_discovery_strategies()
         self.seed_artists = self._initialize_seed_artists()
         self.underground_indicators = self._initialize_underground_indicators()
         
-        self.logger.info("DiscoveryAgent initialized with similarity-based discovery")
+        self.logger.info("Enhanced DiscoveryAgent initialized with multi-hop similarity and underground detection")
     
     async def process(self, state: MusicRecommenderState) -> MusicRecommenderState:
         """
-        Generate similarity-based and underground music recommendations.
+        Generate enhanced discovery recommendations using 100→20 pipeline with
+        multi-hop similarity exploration and underground detection.
         
         Args:
-            state: Current workflow state with planning strategy
+            state: Current workflow state with entities and intent analysis
             
         Returns:
-            Updated state with discovery recommendations
+            Updated state with high-quality discovery recommendations
         """
-        self.add_reasoning_step("Starting similarity-based music discovery")
+        self.add_reasoning_step(
+            "Starting enhanced discovery with multi-hop similarity and underground detection"
+        )
         
         try:
-            # Extract strategy for this agent
-            strategy = self.extract_strategy_for_agent(state.planning_strategy or {})
-            self.log_strategy_application(strategy, "Extracting discovery strategy")
+            # Extract entities and intent from PlannerAgent
+            entities = state.entities or {}
+            intent_analysis = state.intent_analysis or {}
             
-            # Step 1: Analyze discovery requirements
-            discovery_analysis = await self._analyze_discovery_requirements(
-                state.user_query, strategy
-            )
-            self.add_reasoning_step(f"Discovery focus: {discovery_analysis['exploration_type']}")
-            
-            # Step 2: Find seed artists for similarity search
-            seed_artists = await self._find_seed_artists(
-                state.user_query, discovery_analysis, strategy
-            )
-            self.add_reasoning_step(f"Found {len(seed_artists)} seed artists")
-            
-            # Step 3: Explore similar artists and tracks
-            candidate_tracks = await self._explore_similar_music(
-                seed_artists, discovery_analysis, strategy
-            )
-            self.add_reasoning_step(f"Discovered {len(candidate_tracks)} candidate tracks")
-            
-            # Step 4: Filter for underground/novel tracks
-            underground_tracks = await self._filter_for_underground(
-                candidate_tracks, discovery_analysis, strategy
-            )
-            self.add_reasoning_step(f"Filtered to {len(underground_tracks)} underground tracks")
-            
-            # Step 5: Create recommendations with novelty scoring
-            recommendations = await self._create_discovery_recommendations(
-                underground_tracks, discovery_analysis, strategy
+            self.add_reasoning_step(
+                f"Using entities: {len(entities)} categories, "
+                f"intent: {intent_analysis.get('primary_intent', 'discovery')}"
             )
             
-            # Update state
-            state.discovery_recommendations = [rec.model_dump() for rec in recommendations]
+            # Step 1: Generate 100 candidate tracks using enhanced discovery
+            candidate_pool = await self.enhanced_generator.generate_candidate_pool(
+                entities, intent_analysis, agent_type="discovery"
+            )
+            self.add_reasoning_step(
+                f"Generated {len(candidate_pool)} candidates from enhanced discovery"
+            )
+            
+            # Step 2: Apply comprehensive quality scoring to all candidates
+            scored_candidates = await self._score_all_discovery_candidates(
+                candidate_pool, entities, intent_analysis
+            )
+            self.add_reasoning_step(
+                f"Quality scored {len(scored_candidates)} discovery candidates"
+            )
+            
+            # Step 3: Filter by quality threshold and apply discovery-specific filtering
+            high_quality_tracks = await self._apply_discovery_filtering(
+                scored_candidates, entities, intent_analysis
+            )
+            self.add_reasoning_step(
+                f"Filtered to {len(high_quality_tracks)} high-quality discovery tracks"
+            )
+            
+            # Step 4: Select top 20 with novelty and diversity
+            final_tracks = high_quality_tracks[:self.target_recommendations]
+            recommendations = await self._create_enhanced_discovery_recommendations(
+                final_tracks, entities, intent_analysis
+            )
+            
+            # Update state with enhanced recommendations
+            state.discovery_recommendations = [
+                rec.model_dump() for rec in recommendations
+            ]
             state.reasoning_log.append(
-                f"DiscoveryAgent: Generated {len(recommendations)} "
-                f"discovery recommendations with {discovery_analysis['underground_bias']:.1f} underground bias"
+                f"Enhanced DiscoveryAgent: Generated {len(recommendations)} "
+                f"high-quality discovery recommendations using multi-hop similarity"
             )
             
             self.logger.info(
-                "Discovery recommendations completed",
+                "Enhanced discovery recommendations completed",
                 recommendation_count=len(recommendations),
-                exploration_type=discovery_analysis['exploration_type'],
-                underground_bias=discovery_analysis['underground_bias']
+                candidate_pool_size=len(candidate_pool),
+                quality_filtered=len(high_quality_tracks),
+                primary_intent=intent_analysis.get('primary_intent', 'discovery')
             )
             
             return state
             
         except Exception as e:
-            self.logger.error("Discovery recommendation failed", error=str(e))
-            state.reasoning_log.append(f"DiscoveryAgent ERROR: {str(e)}")
+            self.logger.error("Enhanced discovery recommendation failed", error=str(e))
+            state.reasoning_log.append(f"Enhanced DiscoveryAgent ERROR: {str(e)}")
             return state
     
     async def _analyze_discovery_requirements(
@@ -885,4 +907,410 @@ class DiscoveryAgent(BaseAgent):
         elif rec_count >= 2:
             return 0.6
         else:
-            return 0.4 
+            return 0.4
+    
+    async def _score_all_discovery_candidates(
+        self, 
+        candidate_pool: List[Dict[str, Any]], 
+        entities: Dict[str, Any], 
+        intent_analysis: Dict[str, Any]
+    ) -> List[Dict[str, Any]]:
+        """
+        Apply comprehensive quality scoring to all discovery candidates.
+        
+        Args:
+            candidate_pool: List of candidate tracks from enhanced generator
+            entities: Extracted entities from PlannerAgent
+            intent_analysis: Intent analysis from PlannerAgent
+            
+        Returns:
+            List of tracks with quality scores and discovery-specific metadata
+        """
+        scored_candidates = []
+        
+        for track in candidate_pool:
+            try:
+                # Calculate comprehensive quality score
+                quality_result = await self.quality_scorer.calculate_track_quality(
+                    track, entities, intent_analysis
+                )
+                
+                # Calculate discovery-specific novelty score
+                novelty_score = self._calculate_discovery_novelty_score(
+                    track, entities, intent_analysis
+                )
+                
+                # Add quality and novelty information to track
+                track['quality_score'] = quality_result['total_quality_score']
+                track['quality_breakdown'] = quality_result['quality_breakdown']
+                track['quality_tier'] = quality_result['quality_tier']
+                track['novelty_score'] = novelty_score
+                track['discovery_score'] = (
+                    quality_result['total_quality_score'] * 0.6 + 
+                    novelty_score * 0.4
+                )
+                
+                scored_candidates.append(track)
+                
+            except Exception as e:
+                self.logger.warning(
+                    "Discovery quality scoring failed for track",
+                    track=f"{track.get('artist', 'Unknown')} - {track.get('name', 'Unknown')}",
+                    error=str(e)
+                )
+                # Add track with default scores
+                track['quality_score'] = 0.5
+                track['quality_breakdown'] = {}
+                track['quality_tier'] = 'medium'
+                track['novelty_score'] = 0.5
+                track['discovery_score'] = 0.5
+                scored_candidates.append(track)
+        
+        return scored_candidates
+    
+    async def _apply_discovery_filtering(
+        self, 
+        scored_candidates: List[Dict[str, Any]], 
+        entities: Dict[str, Any], 
+        intent_analysis: Dict[str, Any]
+    ) -> List[Dict[str, Any]]:
+        """
+        Apply discovery-specific filtering to ensure novelty and quality.
+        
+        Args:
+            scored_candidates: Tracks with quality and novelty scores
+            entities: Extracted entities
+            intent_analysis: Intent analysis
+            
+        Returns:
+            Filtered and ranked high-quality discovery tracks
+        """
+        # Step 1: Filter by quality threshold
+        high_quality_tracks = [
+            track for track in scored_candidates 
+            if track['quality_score'] >= self.quality_threshold
+        ]
+        
+        # Step 2: Sort by discovery score (quality + novelty)
+        high_quality_tracks.sort(
+            key=lambda x: x['discovery_score'], 
+            reverse=True
+        )
+        
+        # Step 3: Ensure source diversity for discovery
+        diverse_tracks = self._ensure_discovery_source_diversity(high_quality_tracks)
+        
+        # Step 4: Remove tracks that are too similar (discovery-specific)
+        final_tracks = self._remove_discovery_similar_tracks(diverse_tracks)
+        
+        # Step 5: Boost underground and multi-hop tracks
+        final_tracks = self._boost_discovery_tracks(final_tracks)
+        
+        return final_tracks
+    
+    def _calculate_discovery_novelty_score(
+        self, 
+        track: Dict[str, Any], 
+        entities: Dict[str, Any],
+        intent_analysis: Dict[str, Any]
+    ) -> float:
+        """Calculate novelty score specific to discovery context."""
+        novelty_score = 0.0
+        
+        # Source-based novelty scoring
+        source = track.get('source', '')
+        source_novelty = {
+            'multi_hop_similarity': 0.8,  # High novelty for multi-hop discovery
+            'underground_detection': 0.9,  # Very high for underground
+            'serendipitous_discovery': 0.7  # Good for serendipitous
+        }
+        novelty_score += source_novelty.get(source, 0.5) * 0.4
+        
+        # Hop count bonus for multi-hop similarity
+        hop_count = track.get('hop_count', 0)
+        if hop_count > 0:
+            hop_bonus = min(0.3, hop_count * 0.1)  # More hops = more novel
+            novelty_score += hop_bonus
+        
+        # Underground tier bonus
+        underground_tier = track.get('underground_tier')
+        if underground_tier:
+            tier_bonus = {
+                'deep_underground': 0.3,
+                'underground': 0.2,
+                'emerging': 0.1
+            }
+            novelty_score += tier_bonus.get(underground_tier, 0)
+        
+        # Listener count penalty (lower listeners = more novel)
+        listeners = int(track.get('listeners') or 0)
+        if listeners > 0:
+            import math
+            listener_penalty = min(0.2, math.log10(listeners) / 30)  # Penalty for popularity
+            novelty_score = max(0, novelty_score - listener_penalty)
+        else:
+            novelty_score += 0.1  # Bonus for no listener data (very underground)
+        
+        return min(1.0, max(0.0, novelty_score))
+    
+    def _ensure_discovery_source_diversity(
+        self, tracks: List[Dict[str, Any]]
+    ) -> List[Dict[str, Any]]:
+        """Ensure balanced representation from different discovery sources."""
+        source_counts = {}
+        diverse_tracks = []
+        max_per_source = 10  # Maximum tracks per discovery source
+        
+        for track in tracks:
+            source = track.get('source', 'unknown')
+            current_count = source_counts.get(source, 0)
+            
+            if current_count < max_per_source:
+                diverse_tracks.append(track)
+                source_counts[source] = current_count + 1
+        
+        return diverse_tracks
+    
+    def _remove_discovery_similar_tracks(
+        self, tracks: List[Dict[str, Any]]
+    ) -> List[Dict[str, Any]]:
+        """Remove tracks that are too similar for discovery purposes."""
+        unique_tracks = []
+        seen_artists = set()
+        
+        for track in tracks:
+            artist = track.get('artist', '').lower().strip()
+            
+            # Allow max 1 track per artist for discovery (more strict than genre/mood)
+            if artist not in seen_artists:
+                unique_tracks.append(track)
+                seen_artists.add(artist)
+        
+        return unique_tracks
+    
+    def _boost_discovery_tracks(
+        self, tracks: List[Dict[str, Any]]
+    ) -> List[Dict[str, Any]]:
+        """Boost tracks that are particularly good for discovery."""
+        for track in tracks:
+            boost_factor = 1.0
+            
+            # Boost multi-hop tracks with longer paths
+            if track.get('source') == 'multi_hop_similarity':
+                path_length = track.get('path_length', 0)
+                if path_length >= 3:
+                    boost_factor += 0.1
+            
+            # Boost underground tracks
+            if track.get('underground_tier'):
+                boost_factor += 0.15
+            
+            # Boost tracks with rich similarity metadata
+            if track.get('similarity_path'):
+                boost_factor += 0.05
+            
+            # Apply boost to discovery score
+            track['discovery_score'] = min(1.0, track['discovery_score'] * boost_factor)
+        
+        # Re-sort after boosting
+        tracks.sort(key=lambda x: x['discovery_score'], reverse=True)
+        return tracks
+    
+    async def _create_enhanced_discovery_recommendations(
+        self,
+        tracks: List[Dict[str, Any]],
+        entities: Dict[str, Any],
+        intent_analysis: Dict[str, Any]
+    ) -> List[TrackRecommendation]:
+        """
+        Create enhanced TrackRecommendation objects with discovery reasoning.
+        
+        Args:
+            tracks: High-quality filtered discovery tracks
+            entities: Extracted entities
+            intent_analysis: Intent analysis
+            
+        Returns:
+            List of enhanced TrackRecommendation objects
+        """
+        recommendations = []
+        
+        for i, track in enumerate(tracks):
+            try:
+                # Generate enhanced reasoning that includes discovery factors
+                reasoning = self._generate_enhanced_discovery_reasoning(
+                    track, entities, intent_analysis, i + 1
+                )
+                
+                # Extract genres and tags
+                genres = self._extract_discovery_genres_from_entities(track, entities)
+                tags = self._extract_discovery_tags_from_entities(track, entities, intent_analysis)
+                
+                # Create recommendation with discovery information
+                recommendation = TrackRecommendation(
+                    rank=i + 1,
+                    artist=track.get('artist', 'Unknown Artist'),
+                    title=track.get('name', 'Unknown Title'),
+                    id=track.get('mbid') or f"discovery_{track.get('artist', 'unknown')}_{track.get('name', 'unknown')}".replace(' ', '_').lower(),
+                    source="enhanced_discovery",
+                    track_url=track.get('url', ''),
+                    genres=genres,
+                    moods=tags,
+                    quality_score=track.get('quality_score', 0.5),
+                    novelty_score=track.get('novelty_score', 0.5),
+                    concentration_friendliness_score=self._calculate_enhanced_discovery_confidence(track),
+                    confidence=self._calculate_enhanced_discovery_confidence(track),
+                    advocate_source_agent="DiscoveryAgent",  # CRITICAL: Set the source agent
+                    additional_scores={
+                        'source': track.get('source', 'unknown'),
+                        'discovery_score': track.get('discovery_score', 0.5),
+                        'quality_tier': track.get('quality_tier', 'medium'),
+                        'underground_tier': track.get('underground_tier'),
+                        'hop_count': track.get('hop_count', 0),
+                        'listeners': track.get('listeners', 0),
+                        'playcount': track.get('playcount', 0)
+                    },
+                    raw_source_data={
+                        'similarity_path': track.get('similarity_path', []),
+                        'agent': 'enhanced_discovery'
+                    }
+                )
+                
+                recommendations.append(recommendation)
+                
+            except Exception as e:
+                self.logger.warning(
+                    "Enhanced discovery recommendation creation failed",
+                    track=f"{track.get('artist', 'Unknown')} - {track.get('name', 'Unknown')}",
+                    error=str(e)
+                )
+                continue
+        
+        return recommendations
+    
+    def _generate_enhanced_discovery_reasoning(
+        self,
+        track: Dict[str, Any],
+        entities: Dict[str, Any],
+        intent_analysis: Dict[str, Any],
+        rank: int
+    ) -> str:
+        """Generate enhanced reasoning that includes discovery factors."""
+        discovery_score = track.get('discovery_score', 0.5)
+        novelty_score = track.get('novelty_score', 0.5)
+        source = track.get('source', 'unknown')
+        
+        # Base reasoning
+        reasoning_parts = [
+            f"Discovery #{rank} (score: {discovery_score:.2f}, novelty: {novelty_score:.2f})"
+        ]
+        
+        # Add source-specific information
+        source_descriptions = {
+            'multi_hop_similarity': 'found through multi-hop artist similarity',
+            'underground_detection': 'discovered as underground gem',
+            'serendipitous_discovery': 'found through serendipitous exploration'
+        }
+        
+        if source in source_descriptions:
+            reasoning_parts.append(source_descriptions[source])
+        
+        # Add multi-hop specific details
+        if source == 'multi_hop_similarity':
+            hop_count = track.get('hop_count', 0)
+            similarity_path = track.get('similarity_path', [])
+            if hop_count > 0 and similarity_path:
+                path_str = ' → '.join(similarity_path[-3:])  # Show last 3 artists in path
+                reasoning_parts.append(f"{hop_count} degrees from seed via {path_str}")
+        
+        # Add underground details
+        underground_tier = track.get('underground_tier')
+        if underground_tier:
+            reasoning_parts.append(f"classified as {underground_tier.replace('_', ' ')}")
+        
+        # Add quality information
+        quality_tier = track.get('quality_tier', 'medium')
+        reasoning_parts.append(f"{quality_tier} quality")
+        
+        return ". ".join(reasoning_parts) + "."
+    
+    def _extract_discovery_genres_from_entities(
+        self, track: Dict[str, Any], entities: Dict[str, Any]
+    ) -> List[str]:
+        """Extract genres based on entities and discovery context."""
+        genres = []
+        
+        # Add genres from entities
+        musical_entities = entities.get("musical_entities", {})
+        entity_genres = musical_entities.get("genres", {}).get("primary", [])
+        genres.extend(entity_genres)
+        
+        # Add genre from discovery context
+        target_genre = track.get('target_genre', '')
+        serendipity_genre = track.get('serendipity_genre', '')
+        
+        if target_genre:
+            genres.append(target_genre)
+        if serendipity_genre:
+            genres.append(serendipity_genre)
+        
+        # Remove duplicates and return
+        return list(set(genres))[:3]  # Limit to 3 genres
+    
+    def _extract_discovery_tags_from_entities(
+        self, 
+        track: Dict[str, Any], 
+        entities: Dict[str, Any], 
+        intent_analysis: Dict[str, Any]
+    ) -> List[str]:
+        """Extract tags based on entities and discovery intent."""
+        tags = []
+        
+        # Add discovery-specific tags
+        source = track.get('source', '')
+        if source:
+            tags.append(source.replace('_', ' '))
+        
+        # Add underground tier as tag
+        underground_tier = track.get('underground_tier', '')
+        if underground_tier:
+            tags.append(underground_tier.replace('_', ' '))
+        
+        # Add novelty level as tag
+        novelty_score = track.get('novelty_score', 0.5)
+        if novelty_score > 0.7:
+            tags.append('high novelty')
+        elif novelty_score > 0.5:
+            tags.append('medium novelty')
+        
+        # Add multi-hop information
+        hop_count = track.get('hop_count', 0)
+        if hop_count > 0:
+            tags.append(f'{hop_count} degree similarity')
+        
+        # Add intent-based tags
+        primary_intent = intent_analysis.get('primary_intent', '')
+        if primary_intent:
+            tags.append(primary_intent)
+        
+        # Remove duplicates and return
+        return list(set(tags))[:5]  # Limit to 5 tags
+    
+    def _calculate_enhanced_discovery_confidence(self, track: Dict[str, Any]) -> float:
+        """Calculate confidence based on discovery score and metadata."""
+        discovery_score = track.get('discovery_score', 0.5)
+        
+        # Base confidence from discovery score
+        confidence = discovery_score
+        
+        # Boost confidence for tracks with good discovery metadata
+        if track.get('url'):
+            confidence += 0.05
+        if track.get('underground_tier'):
+            confidence += 0.1
+        if track.get('hop_count', 0) > 1:
+            confidence += 0.05
+        if track.get('similarity_path'):
+            confidence += 0.05
+        
+        return min(1.0, confidence) 

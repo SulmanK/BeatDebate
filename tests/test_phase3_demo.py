@@ -71,7 +71,7 @@ async def demo_backend_api():
         rec_request = {
             "query": "I need focus music for coding",
             "session_id": "demo_session",
-            "max_recommendations": 3
+            "max_recommendations": 10
         }
         
         response = requests.post(

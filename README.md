@@ -59,7 +59,7 @@ cp env.example .env
 
 5. **Run the application**
 ```bash
-uv run python src/main.py
+uv run python -m src.main
 ```
 
 ### API Keys Setup

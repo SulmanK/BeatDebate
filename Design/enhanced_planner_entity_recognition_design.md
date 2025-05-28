@@ -699,14 +699,14 @@ async def _create_discovery_strategy(
 
 ### Phase 3: Optimization (Week 5-6)
 1. **Performance Tuning**
-   - Add entity caching mechanisms
-   - Optimize LLM prompt efficiency
-   - Implement batch processing for multiple queries
+   - Add entity caching mechanisms [not needed]
+   - Optimize LLM prompt efficiency 
+   - Implement batch processing for multiple queries [ not needed]
 
 2. **Advanced Coordination**
    - Enhance agent strategy generation
-   - Add cross-agent entity validation
-   - Implement confidence-based fallbacks
+   - Add cross-agent entity validation [not needed]
+   - Implement confidence-based fallbacks 
 
 ### Phase 4: Testing & Refinement (Week 7-8)
 1. **Comprehensive Testing**

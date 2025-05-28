@@ -5,7 +5,6 @@ This module provides REST API endpoints for the 4-agent music recommendation
 system, exposing the RecommendationEngine functionality via HTTP endpoints.
 """
 
-import logging
 import time
 from typing import Dict, Optional
 from contextlib import asynccontextmanager
@@ -25,10 +24,10 @@ from ..models.recommendation_models import (
     TrackRecommendation
 )
 from ..models.agent_models import SystemConfig, AgentConfig
+from .logging_middleware import LoggingMiddleware, PerformanceLoggingMiddleware
 
-# Configure logging
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
+# Setup logger - will be initialized after logging setup
+logger = None
 
 # Global engine instance
 recommendation_engine: Optional[RecommendationEngine] = None
@@ -37,7 +36,12 @@ recommendation_engine: Optional[RecommendationEngine] = None
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Application lifespan manager for startup and shutdown."""
-    global recommendation_engine
+    global recommendation_engine, logger
+    
+    # Initialize logging
+    from ..utils.logging_config import setup_logging, get_logger
+    setup_logging(log_level=os.getenv("LOG_LEVEL", "INFO"))
+    logger = get_logger(__name__)
     
     # Startup
     logger.info("Initializing BeatDebate recommendation engine...")
@@ -106,7 +110,7 @@ app = FastAPI(
     lifespan=lifespan
 )
 
-# Add CORS middleware
+# Add middleware
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],  # Configure appropriately for production
@@ -114,6 +118,10 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# Add logging middleware
+app.add_middleware(LoggingMiddleware, exclude_paths=["/health", "/docs", "/openapi.json"])
+app.add_middleware(PerformanceLoggingMiddleware, slow_request_threshold=5.0)
 
 
 # Request/Response Models
@@ -368,6 +376,30 @@ async def process_feedback(
     )
     # This would integrate with learning/improvement systems
     # For now, just log the feedback
+
+
+@app.get("/sessions/{session_id}/context")
+async def get_session_context(session_id: str):
+    """Get smart context status for a session."""
+    if not recommendation_engine:
+        raise HTTPException(
+            status_code=503, 
+            detail="Recommendation engine not available"
+        )
+    
+    try:
+        context_summary = await recommendation_engine.smart_context_manager.get_context_summary(session_id)
+        return {
+            "session_id": session_id,
+            "context_summary": context_summary,
+            "timestamp": time.time()
+        }
+    except Exception as e:
+        logger.error(f"Failed to get context summary: {e}")
+        raise HTTPException(
+            status_code=500, 
+            detail=f"Failed to get context summary: {str(e)}"
+        )
 
 
 # Error handlers

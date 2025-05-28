@@ -157,7 +157,7 @@ class BeatDebateChatInterface:
             request_data = {
                 "query": query,
                 "session_id": self.session_id,
-                "max_recommendations": 3,
+                "max_recommendations": 10,
                 "include_previews": True
             }
             

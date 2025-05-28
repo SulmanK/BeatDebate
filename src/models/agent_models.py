@@ -57,6 +57,14 @@ class MusicRecommenderState(BaseModel):
     # Planning phase - set once by planner
     planning_strategy: Annotated[Optional[Dict[str, Any]], keep_first] = Field(default=None, description="Strategy created by PlannerAgent")
     execution_plan: Annotated[Optional[Dict[str, Any]], keep_first] = Field(default=None, description="Execution monitoring plan")
+    coordination_strategy: Annotated[Optional[Dict[str, Any]], keep_first] = Field(default=None, description="Enhanced coordination strategy with confidence-based selection")
+    
+    # Enhanced Planning Phase - Entity Recognition (NEW)
+    entities: Annotated[Optional[Dict[str, Any]], keep_first] = Field(default=None, description="Extracted entities from user query")
+    intent_analysis: Annotated[Optional[Dict[str, Any]], keep_first] = Field(default=None, description="Intent analysis from user query")
+    query_understanding: Annotated[Optional[Any], keep_first] = Field(default=None, description="Pure LLM query understanding result")
+    conversation_context: Annotated[Optional[Dict[str, Any]], dict_update_reducer] = Field(default=None, description="Session conversation context")
+    entity_reasoning: Annotated[List[Dict], list_append_reducer] = Field(default_factory=list, description="Entity extraction reasoning steps")
     
     # Advocate phase - these will be updated by parallel agents
     genre_mood_recommendations: Annotated[List[Dict], list_append_reducer] = Field(default_factory=list, description="GenreMoodAgent recommendations")
@@ -76,6 +84,7 @@ class MusicRecommenderState(BaseModel):
     processing_start_time: Annotated[Optional[float], keep_first] = Field(default=None, description="Processing start timestamp")
     total_processing_time: Annotated[Optional[float], keep_first] = Field(default=None, description="Total processing time in seconds")
     session_id: Annotated[Optional[str], keep_first] = Field(default=None, description="Unique session identifier")
+    confidence: Annotated[Optional[float], keep_first] = Field(default=None, description="Overall confidence in query understanding")
 
 
 class AgentStrategy(BaseModel):

@@ -7,10 +7,13 @@ It manages the workflow from initial user query to final recommendations.
 
 import asyncio
 import time
+import os
 from typing import Dict, List, Any, Optional, Callable, TypeVar, Union
 
 import structlog
+from ..utils.logging_config import log_performance
 from langgraph.graph import StateGraph, END
+import google.generativeai as genai
 
 from ..models.agent_models import MusicRecommenderState, AgentConfig, SystemConfig
 from ..agents.planner_agent import PlannerAgent
@@ -18,6 +21,7 @@ from ..agents.genre_mood_agent import GenreMoodAgent
 from ..agents.discovery_agent import DiscoveryAgent
 from ..agents.judge_agent import JudgeAgent
 from ..api.lastfm_client import LastFmClient
+from .smart_context_manager import SmartContextManager
 
 logger = structlog.get_logger(__name__)
 
@@ -35,8 +39,6 @@ def create_gemini_client(api_key: str):
         Configured Gemini client
     """
     try:
-        import google.generativeai as genai
-        
         # Configure the API key
         genai.configure(api_key=api_key)
         
@@ -69,7 +71,8 @@ class RecommendationEngine:
         planner_agent: PlannerAgent,
         genre_mood_agent: GenreMoodAgent,
         discovery_agent: DiscoveryAgent,
-        judge_agent: JudgeAgent
+        judge_agent: JudgeAgent,
+        lastfm_client: "LastFmClient"
     ):
         """
         Initialize the recommendation engine with agent instances.
@@ -79,6 +82,7 @@ class RecommendationEngine:
             genre_mood_agent: Genre and mood advocate agent
             discovery_agent: Discovery and novelty advocate agent
             judge_agent: Final selection judge agent
+            lastfm_client: Last.fm API client
         """
         self.planner_agent = planner_agent
         self.genre_mood_agent = genre_mood_agent
@@ -88,6 +92,25 @@ class RecommendationEngine:
         self.graph = self._build_graph()
         
         self.logger.info("RecommendationEngine initialized with LangGraph workflow")
+        
+        # Initialize LLM clients
+        gemini_api_key = os.getenv("GEMINI_API_KEY")
+        if not gemini_api_key:
+            self.logger.warning("GEMINI_API_KEY not found. LLM features will be limited.")
+            
+        try:
+            genai.configure(api_key=gemini_api_key)
+            self.gemini_client = genai.GenerativeModel('gemini-1.5-flash')
+            self.logger.info("Gemini LLM client initialized successfully")
+        except Exception as e:
+            self.logger.error(f"Failed to initialize Gemini client: {e}")
+            self.gemini_client = None
+            
+        # Initialize data clients
+        self.lastfm_client = lastfm_client
+        
+        # Initialize smart context manager
+        self.smart_context_manager = SmartContextManager()
     
     async def _planner_node_func(self, state: MusicRecommenderState) -> MusicRecommenderState:
         """
@@ -381,6 +404,16 @@ class RecommendationEngine:
                 recommendation_count=len(recommendations) if recommendations else 0
             )
             
+            # Log performance metrics
+            if processing_start:
+                log_performance(
+                    operation="full_recommendation_pipeline",
+                    duration=total_time,
+                    recommendation_count=len(recommendations) if recommendations else 0,
+                    query_length=len(user_query),
+                    has_recommendations=bool(recommendations)
+                )
+            
             # Convert back to MusicRecommenderState if needed
             if isinstance(final_state, dict):
                 return MusicRecommenderState(**final_state)
@@ -445,17 +478,17 @@ class RecommendationEngine:
         self,
         query: str,
         session_id: Optional[str] = None,
-        max_recommendations: int = 3,
+        max_recommendations: int = 10,
         chat_context: Optional[Dict] = None
     ) -> "RecommendationResponse":
         """
-        Get music recommendations using the complete 4-agent workflow.
+        Get music recommendations using the complete 4-agent workflow with smart context management.
         
         Args:
             query: User's music preference query
             session_id: Optional session identifier
             max_recommendations: Maximum number of recommendations to return
-            chat_context: Previous chat context for continuity
+            chat_context: Previous chat context for continuity (legacy support)
             
         Returns:
             Complete recommendation response with tracks and explanations
@@ -463,79 +496,251 @@ class RecommendationEngine:
         from ..models.recommendation_models import RecommendationResponse, TrackRecommendation
         
         self.logger.info(
-            "Getting recommendations", 
+            "Getting recommendations with smart context", 
             query=query, 
             session_id=session_id,
             max_recommendations=max_recommendations
         )
         
-        # Enhance query with chat context if available
-        enhanced_query = query
-        if chat_context:
-            previous_queries = chat_context.get("previous_queries", [])
-            previous_recs = chat_context.get("previous_recommendations", [])
+        # Generate session ID if not provided
+        if not session_id:
+            session_id = f"session_{int(time.time())}"
+        
+        try:
+            # Get LLM understanding of the query if available
+            llm_understanding = None
+            if self.gemini_client:
+                try:
+                    llm_understanding = await self._get_llm_query_understanding(query)
+                except Exception as e:
+                    self.logger.warning(f"LLM understanding failed: {e}")
             
-            if previous_queries:
-                context_info = f"Previous requests: {', '.join(previous_queries[-2:])}"
-                enhanced_query = f"{query} (Context: {context_info})"
-                self.logger.info(f"Enhanced query with context: {enhanced_query}")
+            # Analyze context decision using smart context manager
+            context_decision = await self.smart_context_manager.analyze_context_decision(
+                current_query=query,
+                session_id=session_id,
+                llm_understanding=llm_understanding
+            )
+            
+            self.logger.info(
+                f"Context decision: {context_decision['decision']} "
+                f"(confidence: {context_decision['confidence']:.2f}) - "
+                f"{context_decision['reasoning']}"
+            )
+            
+            # Prepare enhanced query based on context decision
+            enhanced_query = query
+            conversation_context = context_decision.get("context_to_use")
+            
+            if conversation_context and context_decision["action"] != "reset_context":
+                # Add context information to query processing
+                previous_queries = []
+                previous_recs = []
+                
+                interaction_history = conversation_context.get("interaction_history", [])
+                if interaction_history:
+                    previous_queries = [h.get("query", "") for h in interaction_history[-2:]]
+                    previous_recs = [h.get("recommendations", [])[:1] for h in interaction_history[-2:]]
+                
+                # Legacy format for backward compatibility
+                chat_context = {
+                    "previous_queries": previous_queries,
+                    "previous_recommendations": previous_recs,
+                    "context_decision": context_decision,
+                    "smart_context": True
+                }
+                
+                if previous_queries:
+                    context_info = f"Previous requests: {', '.join(previous_queries)}"
+                    enhanced_query = f"{query} (Context: {context_info})"
+                    self.logger.info(f"Enhanced query with smart context: {enhanced_query}")
+            
+            # Process query through full workflow
+            final_state = await self.process_query(
+                enhanced_query, 
+                session_id, 
+                llm_understanding,
+                conversation_context
+            )
+            
+            # Extract recommendations from final state
+            recommendations = []
+            if hasattr(final_state, 'final_recommendations'):
+                recommendations = final_state.final_recommendations
+            elif isinstance(final_state, dict) and 'final_recommendations' in final_state:
+                recommendations = final_state['final_recommendations']
+            
+            # Limit to max_recommendations
+            recommendations = recommendations[:max_recommendations]
+            
+            # Convert to TrackRecommendation objects if needed
+            track_recommendations = []
+            for rec in recommendations:
+                if isinstance(rec, dict):
+                    track_recommendations.append(TrackRecommendation(**rec))
+                else:
+                    track_recommendations.append(rec)
+            
+            # Update context after providing recommendations
+            await self.smart_context_manager.update_context_after_recommendation(
+                session_id=session_id,
+                query=query,
+                llm_understanding=llm_understanding,
+                recommendations=[track.model_dump() for track in track_recommendations],
+                context_decision=context_decision
+            )
+            
+            # Get reasoning log
+            reasoning_log = []
+            if hasattr(final_state, 'reasoning_log'):
+                reasoning_log = final_state.reasoning_log
+            elif isinstance(final_state, dict) and 'reasoning_log' in final_state:
+                reasoning_log = final_state['reasoning_log']
+            
+            # Add context reasoning to log
+            reasoning_log.insert(0, f"Smart Context: {context_decision['reasoning']}")
+            
+            # Get processing time
+            processing_time = None
+            if hasattr(final_state, 'total_processing_time'):
+                processing_time = final_state.total_processing_time
+            elif isinstance(final_state, dict) and 'total_processing_time' in final_state:
+                processing_time = final_state['total_processing_time']
+            
+            # Create response
+            response = RecommendationResponse(
+                recommendations=track_recommendations,
+                reasoning_log=reasoning_log,
+                session_id=session_id,
+                response_time=processing_time or 0.0,
+                agent_coordination_log=[
+                    f"SmartContext: {context_decision['action']} (confidence: {context_decision['confidence']:.2f})",
+                    "PlannerAgent: Strategic planning completed",
+                    "GenreMoodAgent: Genre/mood recommendations generated", 
+                    "DiscoveryAgent: Discovery recommendations generated",
+                    "JudgeAgent: Final selection and ranking completed"
+                ]
+            )
+            
+            self.logger.info(
+                "Recommendations generated successfully with smart context",
+                recommendation_count=len(track_recommendations),
+                processing_time=processing_time,
+                context_decision=context_decision["decision"]
+            )
+            
+            return response
+            
+        except Exception as e:
+            self.logger.error(f"Smart context recommendation failed: {e}")
+            # Fallback to basic recommendations without context
+            return await self._fallback_recommendations(query, session_id, max_recommendations)
+    
+    async def _get_llm_query_understanding(self, query: str) -> Optional[Dict]:
+        """Get LLM understanding of the query for context analysis."""
+        if not self.gemini_client:
+            return None
         
-        # Process query through full workflow
-        final_state = await self.process_query(enhanced_query)
+        try:
+            prompt = f"""
+Analyze this music query and extract key information:
+
+Query: "{query}"
+
+Return JSON with:
+{{
+    "intent": {{"value": "artist_similarity|genre_exploration|mood_matching|activity_context|discovery"}},
+    "artists": ["artist names mentioned"],
+    "genres": ["genres mentioned"],
+    "moods": ["moods/emotions mentioned"],
+    "activities": ["activities mentioned"],
+    "confidence": 0.0-1.0
+}}
+"""
+            
+            response = await self.gemini_client.generate_content_async(prompt)
+            
+            # Parse JSON response
+            import json
+            response_text = response.text.strip()
+            if response_text.startswith('```json'):
+                response_text = response_text.split('```json')[1].split('```')[0]
+            elif response_text.startswith('```'):
+                response_text = response_text.split('```')[1].split('```')[0]
+            
+            return json.loads(response_text)
+            
+        except Exception as e:
+            self.logger.warning(f"LLM query understanding failed: {e}")
+            return None
+    
+    async def process_query(
+        self, 
+        query: str, 
+        session_id: Optional[str] = None, 
+        llm_understanding: Optional[Dict] = None,
+        conversation_context: Optional[Dict] = None
+    ) -> MusicRecommenderState:
+        """
+        Process query through the agent workflow with enhanced context.
         
-        # Extract recommendations from final state
-        recommendations = []
-        if hasattr(final_state, 'final_recommendations'):
-            recommendations = final_state.final_recommendations
-        elif isinstance(final_state, dict) and 'final_recommendations' in final_state:
-            recommendations = final_state['final_recommendations']
-        
-        # Limit to max_recommendations
-        recommendations = recommendations[:max_recommendations]
-        
-        # Convert to TrackRecommendation objects if needed
-        track_recommendations = []
-        for rec in recommendations:
-            if isinstance(rec, dict):
-                track_recommendations.append(TrackRecommendation(**rec))
-            else:
-                track_recommendations.append(rec)
-        
-        # Get reasoning log
-        reasoning_log = []
-        if hasattr(final_state, 'reasoning_log'):
-            reasoning_log = final_state.reasoning_log
-        elif isinstance(final_state, dict) and 'reasoning_log' in final_state:
-            reasoning_log = final_state['reasoning_log']
-        
-        # Get processing time
-        processing_time = None
-        if hasattr(final_state, 'total_processing_time'):
-            processing_time = final_state.total_processing_time
-        elif isinstance(final_state, dict) and 'total_processing_time' in final_state:
-            processing_time = final_state['total_processing_time']
-        
-        # Create response
-        response = RecommendationResponse(
-            recommendations=track_recommendations,
-            reasoning_log=reasoning_log,
+        Args:
+            query: User query
+            session_id: Session identifier
+            llm_understanding: LLM understanding of the query
+            conversation_context: Conversation context from smart context manager
+        """
+        # Create initial state with enhanced context
+        initial_state = MusicRecommenderState(
+            user_query=query,
             session_id=session_id or f"session_{int(time.time())}",
-            response_time=processing_time or 0.0,
+            query_understanding=llm_understanding,
+            conversation_context=conversation_context
+        )
+        
+        # Execute workflow
+        try:
+            final_state = await self.graph.ainvoke(initial_state)
+            return final_state
+        except Exception as e:
+            self.logger.error(f"Workflow execution failed: {e}")
+            raise
+    
+    async def _fallback_recommendations(
+        self, 
+        query: str, 
+        session_id: str, 
+        max_recommendations: int
+    ) -> "RecommendationResponse":
+        """Fallback recommendations when smart context fails."""
+        from ..models.recommendation_models import RecommendationResponse, TrackRecommendation
+        
+        self.logger.warning("Using fallback recommendations")
+        
+        # Simple fallback recommendations
+        demo_tracks = [
+            TrackRecommendation(
+                title="Fallback Track 1",
+                artist="Demo Artist",
+                id="fallback_1",
+                source="fallback",
+                explanation="Fallback recommendation due to context processing error",
+                confidence=0.5
+            )
+        ]
+        
+        return RecommendationResponse(
+            recommendations=demo_tracks,
+            reasoning_log=[
+                "Smart context processing failed, using fallback",
+                "Demo: Basic recommendations provided"
+            ],
             agent_coordination_log=[
-                "PlannerAgent: Strategic planning completed",
-                "GenreMoodAgent: Genre/mood recommendations generated", 
-                "DiscoveryAgent: Discovery recommendations generated",
-                "JudgeAgent: Final selection and ranking completed"
-            ]
+                "Fallback: Limited functionality due to error"
+            ],
+            session_id=session_id,
+            response_time=0.1
         )
-        
-        self.logger.info(
-            "Recommendations generated successfully",
-            recommendation_count=len(track_recommendations),
-            processing_time=processing_time
-        )
-        
-        return response
 
 async def create_recommendation_engine(
     system_config: SystemConfig
@@ -596,7 +801,8 @@ async def create_recommendation_engine(
         planner_agent=planner_agent,
         genre_mood_agent=genre_mood_agent,
         discovery_agent=discovery_agent,
-        judge_agent=judge_agent
+        judge_agent=judge_agent,
+        lastfm_client=lastfm_client
     )
     
     logger.info("RecommendationEngine created successfully")

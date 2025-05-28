@@ -104,11 +104,12 @@ class TrackRecommendation(BaseModel):
     )
     
     # For flexibility with other scores defined by PlannerAgent or Advocates:
-    additional_scores: Dict[str, float] = Field(
+    additional_scores: Dict[str, Any] = Field(
         default_factory=dict, 
         description=(
-            "A dictionary for any other named scores (0-1) "
-            "relevant to evaluation."
+            "A dictionary for any other named scores and metadata "
+            "relevant to evaluation. Can contain numeric scores (0-1) "
+            "and string metadata like source types, quality tiers, etc."
         )
     )
 

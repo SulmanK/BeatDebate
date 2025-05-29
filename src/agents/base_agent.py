@@ -34,20 +34,35 @@ class BaseAgent(ABC):
     - Performance monitoring
     """
     
-    def __init__(self, config: AgentConfig):
+    def __init__(
+        self, 
+        config: AgentConfig, 
+        llm_client=None, 
+        agent_name: str = None,
+        api_service=None,
+        metadata_service=None
+    ):
         """
-        Initialize base agent with configuration.
+        Initialize base agent with configuration and injected dependencies.
         
         Args:
             config: Agent configuration including LLM settings
+            llm_client: LLM client for this agent (optional)
+            agent_name: Override agent name (optional)
+            api_service: Injected API service (Phase 4 dependency injection)
+            metadata_service: Injected metadata service (Phase 4 dependency injection)
         """
         self.config = config
-        self.agent_name = config.agent_name
+        self.agent_name = agent_name or config.agent_name
         self.agent_type = config.agent_type
         self.logger = logger.bind(agent=self.agent_name)
         
-        # Initialize LLM client (will be set up in subclasses)
-        self.llm_client = None
+        # Initialize LLM client
+        self.llm_client = llm_client
+        
+        # Phase 4: Dependency injection for services
+        self.api_service = api_service
+        self.metadata_service = metadata_service
         
         # Performance tracking
         self.processing_times: List[float] = []
@@ -58,7 +73,9 @@ class BaseAgent(ABC):
             "Agent initialized",
             agent_type=self.agent_type,
             llm_model=config.llm_model,
-            temperature=config.temperature
+            temperature=config.temperature,
+            has_api_service=api_service is not None,
+            has_metadata_service=metadata_service is not None
         )
     
     @abstractmethod

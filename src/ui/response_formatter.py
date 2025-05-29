@@ -152,9 +152,9 @@ class ResponseFormatter:
                 return reasoning
         
         # Generate basic reasoning from scores
-        confidence = rec.get("confidence", 0.0)
-        novelty_score = rec.get("novelty_score", 0.0)
-        quality_score = rec.get("quality_score", 0.0)
+        confidence = rec.get("confidence", 0.0) or 0.0
+        novelty_score = rec.get("novelty_score", 0.0) or 0.0
+        quality_score = rec.get("quality_score", 0.0) or 0.0
         
         reasoning_parts = []
         

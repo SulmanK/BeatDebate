@@ -17,10 +17,7 @@ from langgraph.graph import StateGraph, END
 try:
     from ..models.agent_models import MusicRecommenderState, AgentConfig, SystemConfig
     from ..models.metadata_models import UnifiedTrackMetadata, MetadataSource
-    from ..agents.planner_agent import PlannerAgent
-    from ..agents.genre_mood_agent import GenreMoodAgent
-    from ..agents.discovery_agent import DiscoveryAgent
-    from ..agents.judge_agent import JudgeAgent
+    from ..agents import PlannerAgent, GenreMoodAgent, DiscoveryAgent, JudgeAgent
     from .api_service import APIService, get_api_service
     from .smart_context_manager import SmartContextManager
     from .cache_manager import CacheManager, get_cache_manager
@@ -30,10 +27,7 @@ except ImportError:
     sys.path.append('src')
     from models.agent_models import MusicRecommenderState, AgentConfig, SystemConfig
     from models.metadata_models import UnifiedTrackMetadata, MetadataSource
-    from agents.planner_agent import PlannerAgent
-    from agents.genre_mood_agent import GenreMoodAgent
-    from agents.discovery_agent import DiscoveryAgent
-    from agents.judge_agent import JudgeAgent
+    from agents import PlannerAgent, GenreMoodAgent, DiscoveryAgent, JudgeAgent
     from services.api_service import APIService, get_api_service
     from services.smart_context_manager import SmartContextManager
     from services.cache_manager import CacheManager, get_cache_manager
@@ -127,27 +121,47 @@ class EnhancedRecommendationService:
                 max_tokens=1000
             )
             
-            # Get shared LastFM client
+            # Create Gemini client for LLM interactions
+            gemini_api_key = os.getenv('GEMINI_API_KEY', 'demo_gemini_key')
+            gemini_client = create_gemini_client(gemini_api_key)
+            
+            if not gemini_client:
+                self.logger.warning("Failed to create Gemini client, agents will have limited functionality")
+            
+            # Get shared clients from API service
             lastfm_client = await self.api_service.get_lastfm_client()
             
-            # Initialize agents with correct constructors
+            # Create metadata service with shared client
+            from .metadata_service import MetadataService
+            metadata_service = MetadataService(lastfm_client=lastfm_client)
+            
+            # Initialize agents with Gemini client
             self.planner_agent = PlannerAgent(
                 config=agent_config,
-                gemini_client=None  # TODO: Add Gemini client support
+                llm_client=gemini_client,
+                api_service=self.api_service,
+                metadata_service=metadata_service
             )
             
             self.genre_mood_agent = GenreMoodAgent(
                 config=agent_config,
-                lastfm_client=lastfm_client
+                llm_client=gemini_client,
+                api_service=self.api_service,
+                metadata_service=metadata_service
             )
             
             self.discovery_agent = DiscoveryAgent(
                 config=agent_config,
-                lastfm_client=lastfm_client
+                llm_client=gemini_client,
+                api_service=self.api_service,
+                metadata_service=metadata_service
             )
             
             self.judge_agent = JudgeAgent(
-                llm_client=None  # TODO: Add LLM client support
+                config=agent_config,
+                llm_client=gemini_client,
+                api_service=self.api_service,
+                metadata_service=metadata_service
             )
             
             # Build workflow graph
@@ -287,7 +301,7 @@ class EnhancedRecommendationService:
             
             # Convert recommendations to unified metadata
             unified_recommendations = await self._convert_to_unified_metadata(
-                final_state.final_recommendations,
+                getattr(final_state, 'final_recommendations', []),
                 include_audio_features=request.include_audio_features
             )
             
@@ -297,7 +311,7 @@ class EnhancedRecommendationService:
                 recommendations=unified_recommendations,
                 strategy_used=getattr(final_state, 'strategy', {}),
                 reasoning=getattr(final_state, 'reasoning_log', []),
-                session_id=final_state.session_id,
+                session_id=getattr(final_state, 'session_id', request.session_id or "default"),
                 processing_time=processing_time,
                 metadata={
                     "context_decision": context_decision,
@@ -472,6 +486,60 @@ class EnhancedRecommendationService:
         """
         return await self.api_service.search_by_tags(tags=tags, limit=limit)
     
+    async def get_planning_strategy(
+        self,
+        query: str,
+        session_id: Optional[str] = None
+    ) -> Dict[str, Any]:
+        """
+        Get planning strategy from PlannerAgent without executing full workflow.
+        
+        Args:
+            query: User query
+            session_id: Session identifier
+            
+        Returns:
+            Planning strategy dictionary
+        """
+        # Ensure agents are initialized
+        await self.initialize_agents()
+        
+        # Create minimal state for planning
+        initial_state = MusicRecommenderState(
+            user_query=query,
+            session_id=session_id or "default"
+        )
+        
+        try:
+            # Execute only the planner node
+            planning_state = await self._planner_node(initial_state)
+            
+            return {
+                "planning_strategy": getattr(planning_state, 'planning_strategy', {}),
+                "query_understanding": getattr(planning_state, 'query_understanding', {}),
+                "agent_coordination": getattr(planning_state, 'agent_coordination', {}),
+                "session_id": planning_state.session_id
+            }
+            
+        except Exception as e:
+            self.logger.error("Planning strategy generation failed", error=str(e))
+            return {
+                "planning_strategy": {"type": "fallback", "reason": str(e)},
+                "query_understanding": {"intent": "discovery", "confidence": 0.3},
+                "agent_coordination": {"strategy": "simple"},
+                "session_id": session_id or "default"
+            }
+    
+    @property
+    def smart_context_manager(self) -> SmartContextManager:
+        """
+        Access to smart context manager for backward compatibility.
+        
+        Returns:
+            SmartContextManager instance
+        """
+        return self.context_manager
+    
     async def close(self):
         """Close all service connections."""
         await self.api_service.close()
@@ -519,4 +587,34 @@ async def close_recommendation_service():
     
     if _global_recommendation_service:
         await _global_recommendation_service.close()
-        _global_recommendation_service = None 
+        _global_recommendation_service = None
+
+
+def create_gemini_client(api_key: str):
+    """
+    Create a Gemini client for LLM interactions.
+    
+    Args:
+        api_key: Gemini API key
+        
+    Returns:
+        Configured Gemini client
+    """
+    try:
+        import google.generativeai as genai
+        
+        # Configure the API key
+        genai.configure(api_key=api_key)
+        
+        # Create and return the model
+        model = genai.GenerativeModel('gemini-1.5-flash')
+        
+        logger.info("Gemini client created successfully")
+        return model
+        
+    except ImportError:
+        logger.error("google-generativeai library not installed")
+        return None
+    except Exception as e:
+        logger.error("Failed to create Gemini client", error=str(e))
+        return None 

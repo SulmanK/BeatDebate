@@ -13,8 +13,9 @@ from typing import Dict, List, Any, Optional, Tuple
 from datetime import datetime, timedelta
 from enum import Enum
 import re
+import structlog
 
-from ..agents.conversation_context import ConversationContextManager
+from .conversation_context_service import ConversationContextManager
 
 
 class IntentType(Enum):

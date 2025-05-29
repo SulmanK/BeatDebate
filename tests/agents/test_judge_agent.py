@@ -4,7 +4,7 @@ from typing import List, Dict, Any, Optional
 
 # Assuming JudgeAgent and TrackRecommendation are accessible for import
 # Adjust path as necessary based on actual project structure for tests
-from src.agents.judge_agent import EnhancedJudgeAgent, JudgeAgent, MusicRecommenderState # MusicRecommenderState might be mocked or imported from elsewhere too
+from src.agents import JudgeAgent
 from src.models.recommendation_models import TrackRecommendation
 
 # Helper function to create a basic TrackRecommendation model or dict for tests
@@ -43,11 +43,6 @@ def create_track_dict(
 def judge_agent() -> JudgeAgent:
     """Pytest fixture to create a JudgeAgent instance for testing."""
     return JudgeAgent()
-
-@pytest.fixture
-def enhanced_judge_agent() -> EnhancedJudgeAgent:
-    """Pytest fixture to create an EnhancedJudgeAgent instance for testing."""
-    return EnhancedJudgeAgent()
 
 @pytest.fixture
 def mock_music_recommender_state() -> MusicRecommenderState:

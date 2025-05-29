@@ -10,8 +10,7 @@ import asyncio
 from unittest.mock import Mock, AsyncMock
 
 from src.models.agent_models import MusicRecommenderState, AgentConfig
-from src.agents.genre_mood_agent import GenreMoodAgent
-from src.agents.discovery_agent import DiscoveryAgent
+from src.agents import GenreMoodAgent, DiscoveryAgent
 
 
 class TestGenreMoodAgent:

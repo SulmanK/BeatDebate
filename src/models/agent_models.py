@@ -7,6 +7,8 @@ Pydantic models for state management, agent communication, and data structures.
 from typing import Dict, List, Any, Optional, Annotated
 from pydantic import BaseModel, Field
 from datetime import datetime
+from enum import Enum
+from dataclasses import dataclass
 
 
 def keep_first(x: Any, y: Any) -> Any:
@@ -53,11 +55,13 @@ class MusicRecommenderState(BaseModel):
     # Input - these should not change after initial setting
     user_query: Annotated[str, keep_first] = Field(..., description="Original user query for music recommendation")
     user_profile: Annotated[Optional[Dict[str, Any]], keep_first] = Field(default=None, description="User preferences and history")
+    max_recommendations: Annotated[int, keep_first] = Field(default=10, description="Maximum number of recommendations to return")
     
     # Planning phase - set once by planner
     planning_strategy: Annotated[Optional[Dict[str, Any]], keep_first] = Field(default=None, description="Strategy created by PlannerAgent")
     execution_plan: Annotated[Optional[Dict[str, Any]], keep_first] = Field(default=None, description="Execution monitoring plan")
     coordination_strategy: Annotated[Optional[Dict[str, Any]], keep_first] = Field(default=None, description="Enhanced coordination strategy with confidence-based selection")
+    agent_coordination: Annotated[Optional[Dict[str, Any]], keep_first] = Field(default=None, description="Agent coordination plan")
     
     # Enhanced Planning Phase - Entity Recognition (NEW)
     entities: Annotated[Optional[Dict[str, Any]], keep_first] = Field(default=None, description="Extracted entities from user query")
@@ -65,6 +69,7 @@ class MusicRecommenderState(BaseModel):
     query_understanding: Annotated[Optional[Any], keep_first] = Field(default=None, description="Pure LLM query understanding result")
     conversation_context: Annotated[Optional[Dict[str, Any]], dict_update_reducer] = Field(default=None, description="Session conversation context")
     entity_reasoning: Annotated[List[Dict], list_append_reducer] = Field(default_factory=list, description="Entity extraction reasoning steps")
+    context_decision: Annotated[Optional[Dict[str, Any]], keep_first] = Field(default=None, description="Context analysis decision")
     
     # Advocate phase - these will be updated by parallel agents
     genre_mood_recommendations: Annotated[List[Dict], list_append_reducer] = Field(default_factory=list, description="GenreMoodAgent recommendations")
@@ -231,4 +236,53 @@ class SystemConfig(BaseModel):
     
     # Performance settings
     max_concurrent_agents: int = Field(default=2, description="Maximum concurrent agent executions")
-    total_timeout_minutes: int = Field(default=5, description="Total workflow timeout in minutes") 
+    total_timeout_minutes: int = Field(default=5, description="Total workflow timeout in minutes")
+
+
+class QueryIntent(Enum):
+    """Primary intent types for music queries."""
+    ARTIST_SIMILARITY = "artist_similarity"      # "Music like X"
+    GENRE_EXPLORATION = "genre_exploration"      # "I want jazz music"
+    MOOD_MATCHING = "mood_matching"              # "Happy music for workout"
+    ACTIVITY_CONTEXT = "activity_context"        # "Music for studying"
+    DISCOVERY = "discovery"                      # "Something new and different"
+    PLAYLIST_BUILDING = "playlist_building"      # "Songs for my road trip"
+    SPECIFIC_REQUEST = "specific_request"        # "Play Bohemian Rhapsody"
+
+
+class SimilarityType(Enum):
+    """Types of similarity for artist-based queries."""
+    STYLISTIC = "stylistic"        # Similar sound/production
+    GENRE = "genre"               # Same genre family
+    ERA = "era"                   # Same time period
+    MOOD = "mood"                 # Similar emotional feel
+    ENERGY = "energy"             # Similar energy level
+
+
+@dataclass
+class QueryUnderstanding:
+    """Structured representation of understood query."""
+    intent: QueryIntent
+    confidence: float
+    
+    # Core entities
+    artists: List[str]
+    genres: List[str]
+    moods: List[str]
+    activities: List[str]
+    
+    # Intent-specific details
+    similarity_type: Optional[SimilarityType] = None
+    exploration_level: str = "moderate"  # strict, moderate, broad
+    temporal_context: Optional[str] = None
+    energy_level: Optional[str] = None
+    
+    # Agent coordination hints
+    primary_agent: str = "genre_mood"  # Which agent should lead
+    agent_weights: Dict[str, float] = None
+    search_strategy: Dict[str, Any] = None
+    
+    # Original query context
+    original_query: str = ""
+    normalized_query: str = ""
+    reasoning: str = "" 

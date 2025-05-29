@@ -1,8 +1,10 @@
 """
-Conversation Context Management for BeatDebate
+Conversation Context Service for BeatDebate
 
 Manages conversation history, session state, and user preference evolution
 across multiple interactions within a session.
+
+Moved from agents to services layer for proper architecture.
 """
 
 from typing import Dict, List, Any, Optional

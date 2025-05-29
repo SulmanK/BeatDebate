@@ -9,7 +9,7 @@ import asyncio
 from unittest.mock import Mock, AsyncMock
 
 from src.models.agent_models import MusicRecommenderState, AgentConfig
-from src.agents.planner_agent import PlannerAgent
+from src.agents import PlannerAgent
 
 
 class TestPlannerAgent:

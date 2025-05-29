@@ -125,6 +125,9 @@ class APIService:
                 api_key=self.lastfm_api_key
             )
             
+            # Initialize the session immediately
+            await self._lastfm_client.__aenter__()
+            
             self.logger.info("Last.fm client created and cached")
         
         return self._lastfm_client
@@ -138,14 +141,22 @@ class APIService:
         """
         if self._spotify_client is None:
             if not self.spotify_client_id or not self.spotify_client_secret:
-                raise ValueError("Spotify client ID and secret are required")
+                self.logger.warning("Spotify credentials not provided")
+                return None
             
             self._spotify_client = await self.client_factory.create_spotify_client(
                 client_id=self.spotify_client_id,
                 client_secret=self.spotify_client_secret
             )
             
-            self.logger.info("Spotify client created and cached")
+            # Initialize the session
+            try:
+                await self._spotify_client.__aenter__()
+                self.logger.info("Spotify client created and cached")
+            except Exception as e:
+                self.logger.warning("Failed to initialize Spotify client session", error=str(e))
+                self._spotify_client = None
+                return None
         
         return self._spotify_client
     
@@ -196,8 +207,9 @@ class APIService:
         
         # Search Last.fm
         try:
-            async with self.lastfm_session() as lastfm:
-                lastfm_tracks = await lastfm.search_tracks(query, limit)
+            lastfm_client = await self.get_lastfm_client()
+            if lastfm_client:
+                lastfm_tracks = await lastfm_client.search_tracks(query, limit)
                 
                 for track in lastfm_tracks:
                     unified_track = UnifiedTrackMetadata(
@@ -217,19 +229,29 @@ class APIService:
         # Enhance with Spotify data if requested
         if include_spotify and unified_tracks:
             try:
-                async with self.spotify_session() as spotify:
+                spotify_client = await self.get_spotify_client()
+                if spotify_client:
                     for unified_track in unified_tracks:
-                        spotify_track = await spotify.search_track(
-                            unified_track.artist,
-                            unified_track.name,
-                            limit=1
-                        )
-                        
-                        if spotify_track:
-                            unified_track.spotify_data = spotify_track
-                            unified_track.preview_url = spotify_track.preview_url
-                            unified_track.popularity = spotify_track.popularity
+                        try:
+                            spotify_track = await spotify_client.search_track(
+                                unified_track.artist,
+                                unified_track.name,
+                                limit=1
+                            )
                             
+                            if spotify_track:
+                                unified_track.spotify_data = spotify_track
+                                unified_track.preview_url = spotify_track.preview_url
+                                unified_track.popularity = spotify_track.popularity
+                        except Exception as e:
+                            self.logger.debug(
+                                "Spotify track search failed", 
+                                artist=unified_track.artist,
+                                track=unified_track.name,
+                                error=str(e)
+                            )
+                            continue
+                        
             except Exception as e:
                 self.logger.error("Spotify enhancement failed", error=str(e))
         
@@ -271,8 +293,9 @@ class APIService:
         
         # Get Last.fm data
         try:
-            async with self.lastfm_session() as lastfm:
-                lastfm_track = await lastfm.get_track_info(artist, track)
+            lastfm_client = await self.get_lastfm_client()
+            if lastfm_client:
+                lastfm_track = await lastfm_client.get_track_info(artist, track)
                 
                 if lastfm_track:
                     unified_track = UnifiedTrackMetadata(
@@ -292,8 +315,9 @@ class APIService:
         # Enhance with Spotify data
         if unified_track:
             try:
-                async with self.spotify_session() as spotify:
-                    spotify_track = await spotify.search_track(artist, track)
+                spotify_client = await self.get_spotify_client()
+                if spotify_client:
+                    spotify_track = await spotify_client.search_track(artist, track)
                     
                     if spotify_track:
                         unified_track.spotify_data = spotify_track
@@ -303,7 +327,7 @@ class APIService:
                         
                         # Get audio features if requested
                         if include_audio_features:
-                            audio_features = await spotify.get_audio_features(
+                            audio_features = await spotify_client.get_audio_features(
                                 spotify_track.id
                             )
                             if audio_features:
@@ -340,8 +364,9 @@ class APIService:
         similar_tracks = []
         
         try:
-            async with self.lastfm_session() as lastfm:
-                lastfm_similar = await lastfm.get_similar_tracks(artist, track, limit)
+            lastfm_client = await self.get_lastfm_client()
+            if lastfm_client:
+                lastfm_similar = await lastfm_client.get_similar_tracks(artist, track, limit)
                 
                 for similar_track in lastfm_similar:
                     unified_track = UnifiedTrackMetadata(
@@ -358,23 +383,33 @@ class APIService:
         # Enhance with Spotify data if requested
         if include_spotify_features and similar_tracks:
             try:
-                async with self.spotify_session() as spotify:
+                spotify_client = await self.get_spotify_client()
+                if spotify_client:
                     for unified_track in similar_tracks:
-                        spotify_track = await spotify.search_track(
-                            unified_track.artist,
-                            unified_track.name
-                        )
-                        
-                        if spotify_track:
-                            unified_track.spotify_data = spotify_track
-                            unified_track.source = MetadataSource.UNIFIED
+                        try:
+                            spotify_track = await spotify_client.search_track(
+                                unified_track.artist,
+                                unified_track.name
+                            )
                             
-                            if include_spotify_features:
-                                audio_features = await spotify.get_audio_features(
-                                    spotify_track.id
-                                )
-                                if audio_features:
-                                    unified_track.audio_features = audio_features
+                            if spotify_track:
+                                unified_track.spotify_data = spotify_track
+                                unified_track.source = MetadataSource.UNIFIED
+                                
+                                if include_spotify_features:
+                                    audio_features = await spotify_client.get_audio_features(
+                                        spotify_track.id
+                                    )
+                                    if audio_features:
+                                        unified_track.audio_features = audio_features
+                        except Exception as e:
+                            self.logger.debug(
+                                "Spotify similar track enhancement failed",
+                                artist=unified_track.artist,
+                                track=unified_track.name,
+                                error=str(e)
+                            )
+                            continue
                                     
             except Exception as e:
                 self.logger.error("Spotify similar tracks enhancement failed", error=str(e))
@@ -404,8 +439,9 @@ class APIService:
             List of tracks matching tags
         """
         try:
-            async with self.lastfm_session() as lastfm:
-                lastfm_tracks = await lastfm.search_by_tags(tags, limit)
+            lastfm_client = await self.get_lastfm_client()
+            if lastfm_client:
+                lastfm_tracks = await lastfm_client.search_by_tags(tags, limit)
                 
                 unified_tracks = []
                 for track in lastfm_tracks:
@@ -446,8 +482,9 @@ class APIService:
             Unified artist metadata or None
         """
         try:
-            async with self.lastfm_session() as lastfm:
-                artist_info = await lastfm.get_artist_info(artist)
+            lastfm_client = await self.get_lastfm_client()
+            if lastfm_client:
+                artist_info = await lastfm_client.get_artist_info(artist)
                 
                 if not artist_info:
                     return None
@@ -465,7 +502,7 @@ class APIService:
                 
                 # Get top tracks if requested
                 if include_top_tracks:
-                    top_tracks = await lastfm.get_artist_top_tracks(artist, limit=10)
+                    top_tracks = await lastfm_client.get_artist_top_tracks(artist, limit=10)
                     unified_artist.top_tracks = [
                         track.name for track in top_tracks
                     ]
@@ -476,13 +513,188 @@ class APIService:
             self.logger.error("Artist info failed", artist=artist, error=str(e))
             return None
     
+    # Additional methods expected by unified candidate generator
+    
+    async def search_tracks(
+        self,
+        query: str,
+        limit: int = 20
+    ) -> List[UnifiedTrackMetadata]:
+        """
+        Search tracks with a general query.
+        Alias for search_unified_tracks for compatibility.
+        
+        Args:
+            query: Search query
+            limit: Maximum results
+            
+        Returns:
+            List of unified track metadata
+        """
+        return await self.search_unified_tracks(
+            query=query,
+            limit=limit,
+            include_spotify=True
+        )
+    
+    async def get_similar_artist_tracks(
+        self,
+        artist: str,
+        limit: int = 20
+    ) -> List[UnifiedTrackMetadata]:
+        """
+        Get tracks from artists similar to the given artist.
+        
+        Args:
+            artist: Artist name
+            limit: Maximum results
+            
+        Returns:
+            List of tracks from similar artists
+        """
+        try:
+            # Get similar artists first
+            lastfm_client = await self.get_lastfm_client()
+            if lastfm_client:
+                artist_info = await lastfm_client.get_artist_info(artist)
+                
+                if not artist_info or not artist_info.similar_artists:
+                    return []
+                
+                similar_tracks = []
+                tracks_per_artist = max(1, limit // len(artist_info.similar_artists))
+                
+                for similar_artist in artist_info.similar_artists[:5]:  # Limit to top 5
+                    try:
+                        artist_tracks = await lastfm_client.get_artist_top_tracks(
+                            similar_artist, 
+                            limit=tracks_per_artist
+                        )
+                        
+                        for track in artist_tracks:
+                            unified_track = UnifiedTrackMetadata(
+                                name=track.name,
+                                artist=track.artist,
+                                source=MetadataSource.LASTFM,
+                                lastfm_data=track,
+                                tags=track.tags if hasattr(track, 'tags') else [],
+                                listeners=track.listeners,
+                                playcount=track.playcount
+                            )
+                            similar_tracks.append(unified_track)
+                            
+                            if len(similar_tracks) >= limit:
+                                break
+                                
+                    except Exception as e:
+                        self.logger.warning(
+                            "Failed to get tracks for similar artist",
+                            similar_artist=similar_artist,
+                            error=str(e)
+                        )
+                        continue
+                    
+                    if len(similar_tracks) >= limit:
+                        break
+                
+                self.logger.info(
+                    "Similar artist tracks search completed",
+                    seed_artist=artist,
+                    results=len(similar_tracks)
+                )
+                
+                return similar_tracks[:limit]
+                
+        except Exception as e:
+            self.logger.error(
+                "Similar artist tracks search failed", 
+                artist=artist, 
+                error=str(e)
+            )
+            return []
+    
+    async def get_tracks_by_tag(
+        self,
+        tag: str,
+        limit: int = 20
+    ) -> List[UnifiedTrackMetadata]:
+        """
+        Get tracks by a specific tag.
+        Alias for search_by_tags for compatibility.
+        
+        Args:
+            tag: Tag to search for
+            limit: Maximum results
+            
+        Returns:
+            List of tracks matching the tag
+        """
+        return await self.search_by_tags(tags=[tag], limit=limit)
+    
+    async def get_artist_top_tracks(
+        self,
+        artist: str,
+        limit: int = 20
+    ) -> List[UnifiedTrackMetadata]:
+        """
+        Get top tracks for an artist.
+        
+        Args:
+            artist: Artist name
+            limit: Maximum results
+            
+        Returns:
+            List of top tracks with unified metadata
+        """
+        try:
+            lastfm_client = await self.get_lastfm_client()
+            if lastfm_client:
+                lastfm_tracks = await lastfm_client.get_artist_top_tracks(artist, limit)
+                
+                unified_tracks = []
+                for track in lastfm_tracks:
+                    unified_track = UnifiedTrackMetadata(
+                        name=track.name,
+                        artist=track.artist,
+                        source=MetadataSource.LASTFM,
+                        lastfm_data=track,
+                        tags=track.tags if hasattr(track, 'tags') else [],
+                        listeners=track.listeners,
+                        playcount=track.playcount
+                    )
+                    unified_tracks.append(unified_track)
+                
+                self.logger.info(
+                    "Artist top tracks search completed",
+                    artist=artist,
+                    results=len(unified_tracks)
+                )
+                
+                return unified_tracks
+                
+        except Exception as e:
+            self.logger.error(
+                "Artist top tracks search failed", 
+                artist=artist, 
+                error=str(e)
+            )
+            return []
+    
     async def close(self):
         """Close all API client connections."""
-        if self._lastfm_client:
-            await self._lastfm_client.__aexit__(None, None, None)
+        try:
+            if self._lastfm_client:
+                await self._lastfm_client.__aexit__(None, None, None)
+                self._lastfm_client = None
+        except Exception as e:
+            self.logger.warning("Error closing Last.fm client", error=str(e))
         
-        if self._spotify_client:
-            await self._spotify_client.__aexit__(None, None, None)
+        try:
+            if self._spotify_client:
+                await self._spotify_client.__aexit__(None, None, None)
+                self._spotify_client = None
+        except Exception as e:
+            self.logger.warning("Error closing Spotify client", error=str(e))
         
         self.logger.info("API Service connections closed")
 

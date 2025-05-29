@@ -1,0 +1,647 @@
+"""
+Shared Query Analysis Utilities for BeatDebate Agents
+
+Consolidates query analysis patterns that are duplicated across agents,
+providing a unified approach to query understanding and intent detection.
+"""
+
+import re
+from typing import Dict, List, Any, Optional, Tuple
+import structlog
+
+logger = structlog.get_logger(__name__)
+
+
+class QueryAnalysisUtils:
+    """
+    Shared utilities for query analysis across all agents.
+    
+    Consolidates:
+    - Intent detection
+    - Complexity analysis
+    - Mood/context extraction
+    - Query classification
+    - Pattern matching utilities
+    """
+    
+    def __init__(self):
+        """Initialize query analysis utilities."""
+        self.logger = logger.bind(component="QueryAnalysisUtils")
+        
+        # Intent patterns
+        self.intent_patterns = {
+            'discovery': [
+                'discover', 'find new', 'explore', 'unknown', 'hidden gems',
+                'underground', 'obscure', 'rare', 'unheard', 'fresh'
+            ],
+            'similarity': [
+                'like', 'similar to', 'sounds like', 'reminds me of',
+                'in the style of', 'comparable to', 'along the lines of'
+            ],
+            'mood_based': [
+                'feel', 'mood', 'vibe', 'atmosphere', 'energy',
+                'upbeat', 'calm', 'relaxing', 'energetic', 'chill'
+            ],
+            'activity_based': [
+                'work', 'study', 'exercise', 'party', 'relax',
+                'driving', 'cooking', 'sleeping', 'focus'
+            ],
+            'genre_specific': [
+                'rock', 'pop', 'electronic', 'jazz', 'classical',
+                'hip hop', 'country', 'folk', 'metal', 'indie'
+            ]
+        }
+        
+        # Complexity indicators
+        self.complexity_indicators = {
+            'simple': [
+                'just', 'only', 'simple', 'basic', 'easy',
+                'quick', 'fast', 'straightforward'
+            ],
+            'medium': [
+                'some', 'few', 'several', 'maybe', 'perhaps',
+                'could', 'might', 'possibly'
+            ],
+            'complex': [
+                'detailed', 'comprehensive', 'thorough', 'deep',
+                'extensive', 'elaborate', 'sophisticated', 'nuanced'
+            ]
+        }
+        
+        # Urgency indicators
+        self.urgency_patterns = {
+            'high': ['urgent', 'asap', 'immediately', 'right now', 'quickly'],
+            'medium': ['soon', 'when possible', 'at your convenience'],
+            'low': ['whenever', 'no rush', 'take your time']
+        }
+        
+        # Quality preferences
+        self.quality_patterns = {
+            'high_quality': [
+                'best', 'top', 'excellent', 'outstanding', 'premium',
+                'high quality', 'masterpiece', 'classic'
+            ],
+            'popular': [
+                'popular', 'mainstream', 'well-known', 'famous',
+                'chart', 'hit', 'trending'
+            ],
+            'underground': [
+                'underground', 'obscure', 'hidden', 'rare',
+                'unknown', 'indie', 'alternative'
+            ]
+        }
+    
+    def analyze_query_intent(self, query: str) -> Dict[str, Any]:
+        """
+        Analyze query to determine primary intent and confidence.
+        
+        Args:
+            query: User query text
+            
+        Returns:
+            Dictionary with intent analysis
+        """
+        # Ensure query is a string
+        if isinstance(query, dict):
+            query = query.get('query', str(query))
+        elif not isinstance(query, str):
+            query = str(query)
+            
+        query_lower = query.lower()
+        intent_scores = {}
+        
+        # Score each intent category
+        for intent, patterns in self.intent_patterns.items():
+            score = 0
+            matched_patterns = []
+            
+            for pattern in patterns:
+                if pattern in query_lower:
+                    score += 1
+                    matched_patterns.append(pattern)
+            
+            if score > 0:
+                intent_scores[intent] = {
+                    'score': score,
+                    'confidence': min(0.9, score * 0.3),
+                    'matched_patterns': matched_patterns
+                }
+        
+        # Determine primary intent
+        if intent_scores:
+            primary_intent = max(intent_scores.keys(), key=lambda x: intent_scores[x]['score'])
+            primary_confidence = intent_scores[primary_intent]['confidence']
+        else:
+            primary_intent = 'discovery'  # Default intent
+            primary_confidence = 0.3
+        
+        # Determine secondary intents
+        secondary_intents = [
+            intent for intent, data in intent_scores.items() 
+            if intent != primary_intent and data['score'] > 0
+        ]
+        
+        self.logger.debug(
+            "Query intent analyzed",
+            primary_intent=primary_intent,
+            primary_confidence=primary_confidence,
+            secondary_intents=secondary_intents,
+            total_intent_scores=len(intent_scores)
+        )
+        
+        return {
+            'primary_intent': primary_intent,
+            'primary_confidence': primary_confidence,
+            'secondary_intents': secondary_intents,
+            'intent_scores': intent_scores,
+            'has_multiple_intents': len(intent_scores) > 1
+        }
+    
+    def analyze_query_complexity(self, query: str) -> Dict[str, Any]:
+        """
+        Analyze query complexity based on various factors.
+        
+        Args:
+            query: User query text
+            
+        Returns:
+            Dictionary with complexity analysis
+        """
+        # Ensure query is a string
+        if isinstance(query, dict):
+            query = query.get('query', str(query))
+        elif not isinstance(query, str):
+            query = str(query)
+            
+        query_lower = query.lower()
+        
+        # Basic metrics
+        word_count = len(query.split())
+        sentence_count = len(re.split(r'[.!?]+', query))
+        
+        # Complexity indicators
+        complexity_scores = {}
+        for level, indicators in self.complexity_indicators.items():
+            score = sum(1 for indicator in indicators if indicator in query_lower)
+            if score > 0:
+                complexity_scores[level] = score
+        
+        # Determine complexity level
+        if complexity_scores.get('complex', 0) > 0 or word_count > 20:
+            complexity_level = 'complex'
+            confidence = 0.8
+        elif complexity_scores.get('simple', 0) > 0 or word_count < 5:
+            complexity_level = 'simple'
+            confidence = 0.7
+        else:
+            complexity_level = 'medium'
+            confidence = 0.6
+        
+        # Additional complexity factors
+        has_multiple_entities = self._count_entities_in_query(query) > 2
+        has_conditional_logic = any(word in query_lower for word in ['if', 'when', 'unless', 'but'])
+        has_comparisons = any(word in query_lower for word in ['better', 'worse', 'more', 'less', 'than'])
+        
+        # Adjust complexity based on additional factors
+        if has_multiple_entities or has_conditional_logic or has_comparisons:
+            if complexity_level == 'simple':
+                complexity_level = 'medium'
+            elif complexity_level == 'medium':
+                complexity_level = 'complex'
+        
+        self.logger.debug(
+            "Query complexity analyzed",
+            complexity_level=complexity_level,
+            word_count=word_count,
+            sentence_count=sentence_count,
+            has_multiple_entities=has_multiple_entities
+        )
+        
+        return {
+            'complexity_level': complexity_level,
+            'confidence': confidence,
+            'word_count': word_count,
+            'sentence_count': sentence_count,
+            'complexity_scores': complexity_scores,
+            'has_multiple_entities': has_multiple_entities,
+            'has_conditional_logic': has_conditional_logic,
+            'has_comparisons': has_comparisons
+        }
+    
+    def extract_mood_indicators(self, query: str) -> List[str]:
+        """
+        Extract mood indicators from query text.
+        
+        Args:
+            query: User query text
+            
+        Returns:
+            List of detected mood indicators
+        """
+        query_lower = query.lower()
+        mood_indicators = []
+        
+        # Direct mood words
+        mood_words = [
+            'happy', 'sad', 'energetic', 'calm', 'relaxed', 'excited',
+            'melancholic', 'upbeat', 'chill', 'intense', 'peaceful',
+            'aggressive', 'romantic', 'nostalgic', 'dreamy', 'dark'
+        ]
+        
+        for mood in mood_words:
+            if mood in query_lower:
+                mood_indicators.append(mood)
+        
+        # Contextual mood patterns
+        mood_patterns = [
+            (r'\bfeel(?:ing)?\s+(\w+)', 'feeling'),
+            (r'\bmood\s+(?:is\s+)?(\w+)', 'mood'),
+            (r'\bvibe\s+(?:is\s+)?(\w+)', 'vibe'),
+            (r'\b(\w+)\s+energy\b', 'energy'),
+            (r'\bmake\s+me\s+feel\s+(\w+)', 'effect')
+        ]
+        
+        for pattern, context in mood_patterns:
+            matches = re.findall(pattern, query_lower)
+            for match in matches:
+                if len(match) > 2:  # Filter out very short words
+                    mood_indicators.append(f"{match} ({context})")
+        
+        # Remove duplicates while preserving order
+        mood_indicators = list(dict.fromkeys(mood_indicators))
+        
+        self.logger.debug(
+            "Mood indicators extracted",
+            mood_count=len(mood_indicators),
+            moods=mood_indicators
+        )
+        
+        return mood_indicators
+    
+    def extract_context_factors(self, query: str) -> List[str]:
+        """
+        Extract context/activity factors from query text.
+        
+        Args:
+            query: User query text
+            
+        Returns:
+            List of detected context factors
+        """
+        query_lower = query.lower()
+        context_factors = []
+        
+        # Activity contexts
+        activities = [
+            'work', 'working', 'study', 'studying', 'exercise', 'workout',
+            'party', 'partying', 'relax', 'relaxing', 'drive', 'driving',
+            'cook', 'cooking', 'sleep', 'sleeping', 'focus', 'focusing',
+            'read', 'reading', 'clean', 'cleaning', 'travel', 'traveling'
+        ]
+        
+        for activity in activities:
+            if activity in query_lower:
+                # Normalize to base form
+                base_activity = activity.rstrip('ing').rstrip('e') + ('e' if activity.endswith('ing') and not activity.endswith('eing') else '')
+                if base_activity not in context_factors:
+                    context_factors.append(base_activity)
+        
+        # Time contexts
+        time_patterns = [
+            (r'\b(morning|afternoon|evening|night)\b', 'time_of_day'),
+            (r'\b(weekend|weekday|monday|tuesday|wednesday|thursday|friday|saturday|sunday)\b', 'day_type'),
+            (r'\b(summer|winter|spring|fall|autumn)\b', 'season')
+        ]
+        
+        for pattern, context_type in time_patterns:
+            matches = re.findall(pattern, query_lower)
+            for match in matches:
+                context_factors.append(f"{match} ({context_type})")
+        
+        # Location contexts
+        location_patterns = [
+            r'\b(home|office|car|gym|outdoors|inside|outside)\b',
+            r'\b(at\s+(?:the\s+)?(\w+))\b'
+        ]
+        
+        for pattern in location_patterns:
+            matches = re.findall(pattern, query_lower)
+            for match in matches:
+                if isinstance(match, tuple):
+                    match = match[0] if match[0] else match[1]
+                if len(match) > 2:
+                    context_factors.append(f"{match} (location)")
+        
+        # Remove duplicates
+        context_factors = list(dict.fromkeys(context_factors))
+        
+        self.logger.debug(
+            "Context factors extracted",
+            context_count=len(context_factors),
+            contexts=context_factors
+        )
+        
+        return context_factors
+    
+    def detect_urgency_level(self, query: str) -> Dict[str, Any]:
+        """
+        Detect urgency level from query text.
+        
+        Args:
+            query: User query text
+            
+        Returns:
+            Dictionary with urgency analysis
+        """
+        query_lower = query.lower()
+        urgency_scores = {}
+        
+        # Check for urgency patterns
+        for level, patterns in self.urgency_patterns.items():
+            score = sum(1 for pattern in patterns if pattern in query_lower)
+            if score > 0:
+                urgency_scores[level] = score
+        
+        # Determine urgency level
+        if urgency_scores:
+            urgency_level = max(urgency_scores.keys(), key=lambda x: urgency_scores[x])
+            confidence = min(0.9, urgency_scores[urgency_level] * 0.4)
+        else:
+            urgency_level = 'medium'  # Default
+            confidence = 0.3
+        
+        # Check for time-sensitive language
+        time_sensitive_patterns = [
+            r'\bnow\b', r'\btoday\b', r'\btonight\b', r'\bimmediately\b',
+            r'\bquickly\b', r'\basap\b', r'\burgent\b'
+        ]
+        
+        has_time_pressure = any(
+            re.search(pattern, query_lower) for pattern in time_sensitive_patterns
+        )
+        
+        if has_time_pressure and urgency_level == 'medium':
+            urgency_level = 'high'
+            confidence = max(confidence, 0.7)
+        
+        self.logger.debug(
+            "Urgency level detected",
+            urgency_level=urgency_level,
+            confidence=confidence,
+            has_time_pressure=has_time_pressure
+        )
+        
+        return {
+            'urgency_level': urgency_level,
+            'confidence': confidence,
+            'urgency_scores': urgency_scores,
+            'has_time_pressure': has_time_pressure
+        }
+    
+    def detect_quality_preferences(self, query: str) -> Dict[str, Any]:
+        """
+        Detect quality preferences from query text.
+        
+        Args:
+            query: User query text
+            
+        Returns:
+            Dictionary with quality preference analysis
+        """
+        query_lower = query.lower()
+        quality_scores = {}
+        
+        # Check for quality patterns
+        for preference, patterns in self.quality_patterns.items():
+            score = sum(1 for pattern in patterns if pattern in query_lower)
+            if score > 0:
+                quality_scores[preference] = score
+        
+        # Determine primary quality preference
+        if quality_scores:
+            primary_preference = max(quality_scores.keys(), key=lambda x: quality_scores[x])
+            confidence = min(0.9, quality_scores[primary_preference] * 0.3)
+        else:
+            primary_preference = 'balanced'  # Default
+            confidence = 0.3
+        
+        # Check for specific quality indicators
+        has_quality_focus = any(word in query_lower for word in [
+            'quality', 'good', 'great', 'excellent', 'amazing', 'perfect'
+        ])
+        
+        has_quantity_focus = any(word in query_lower for word in [
+            'many', 'lots', 'bunch', 'several', 'multiple', 'various'
+        ])
+        
+        self.logger.debug(
+            "Quality preferences detected",
+            primary_preference=primary_preference,
+            confidence=confidence,
+            has_quality_focus=has_quality_focus,
+            has_quantity_focus=has_quantity_focus
+        )
+        
+        return {
+            'primary_preference': primary_preference,
+            'confidence': confidence,
+            'quality_scores': quality_scores,
+            'has_quality_focus': has_quality_focus,
+            'has_quantity_focus': has_quantity_focus
+        }
+    
+    def classify_query_type(self, query: str) -> Dict[str, Any]:
+        """
+        Classify the overall type of query.
+        
+        Args:
+            query: User query text
+            
+        Returns:
+            Dictionary with query classification
+        """
+        # Ensure query is a string
+        if isinstance(query, dict):
+            query = query.get('query', str(query))
+        elif not isinstance(query, str):
+            query = str(query)
+        
+        query_lower = query.lower()
+        
+        # Query type patterns
+        type_patterns = {
+            'recommendation': [
+                'recommend', 'suggest', 'find', 'show me', 'give me',
+                'what should', 'can you', 'help me find'
+            ],
+            'comparison': [
+                'compare', 'difference', 'better', 'worse', 'versus',
+                'vs', 'which is', 'what\'s the difference'
+            ],
+            'information': [
+                'what is', 'who is', 'tell me about', 'explain',
+                'describe', 'information about'
+            ],
+            'exploration': [
+                'explore', 'discover', 'browse', 'show me more',
+                'what else', 'similar', 'related'
+            ]
+        }
+        
+        type_scores = {}
+        for query_type, patterns in type_patterns.items():
+            score = sum(1 for pattern in patterns if pattern in query_lower)
+            if score > 0:
+                type_scores[query_type] = score
+        
+        # Determine primary query type
+        if type_scores:
+            primary_type = max(type_scores.keys(), key=lambda x: type_scores[x])
+            confidence = min(0.9, type_scores[primary_type] * 0.4)
+        else:
+            primary_type = 'recommendation'  # Default
+            confidence = 0.4
+        
+        # Check for question patterns
+        is_question = query.strip().endswith('?') or any(
+            query_lower.startswith(word) for word in [
+                'what', 'who', 'where', 'when', 'why', 'how',
+                'can', 'could', 'would', 'should', 'do', 'does'
+            ]
+        )
+        
+        # Check for imperative patterns
+        is_imperative = any(
+            query_lower.startswith(word) for word in [
+                'find', 'show', 'give', 'recommend', 'suggest',
+                'play', 'tell', 'help', 'get'
+            ]
+        )
+        
+        self.logger.debug(
+            "Query type classified",
+            primary_type=primary_type,
+            confidence=confidence,
+            is_question=is_question,
+            is_imperative=is_imperative
+        )
+        
+        return {
+            'primary_type': primary_type,
+            'confidence': confidence,
+            'type_scores': type_scores,
+            'is_question': is_question,
+            'is_imperative': is_imperative,
+            'query_structure': 'question' if is_question else ('imperative' if is_imperative else 'statement')
+        }
+    
+    def _count_entities_in_query(self, query: str) -> int:
+        """Count approximate number of entities in query."""
+        # Simple heuristic: count proper nouns and quoted strings
+        proper_nouns = len(re.findall(r'\b[A-Z][a-z]+\b', query))
+        quoted_strings = len(re.findall(r'["\'][^"\']+["\']', query))
+        
+        return proper_nouns + quoted_strings
+    
+    def extract_genre_hints(self, query: str) -> List[str]:
+        """
+        Extract genre hints from query text.
+        
+        Args:
+            query: User query text
+            
+        Returns:
+            List of detected genre hints
+        """
+        query_lower = query.lower()
+        genre_hints = []
+        
+        # Common genres
+        genres = [
+            'rock', 'pop', 'electronic', 'jazz', 'classical', 'hip hop',
+            'country', 'folk', 'metal', 'indie', 'alternative', 'blues',
+            'reggae', 'punk', 'funk', 'soul', 'r&b', 'techno', 'house',
+            'ambient', 'experimental', 'world', 'latin', 'gospel'
+        ]
+        
+        for genre in genres:
+            if genre in query_lower:
+                genre_hints.append(genre)
+        
+        # Genre-related patterns
+        genre_patterns = [
+            r'\b(\w+)\s+music\b',
+            r'\b(\w+)\s+genre\b',
+            r'\b(\w+)\s+style\b',
+            r'\b(\w+)\s+sound\b'
+        ]
+        
+        for pattern in genre_patterns:
+            matches = re.findall(pattern, query_lower)
+            for match in matches:
+                if len(match) > 2 and match not in genre_hints:
+                    genre_hints.append(match)
+        
+        # Remove duplicates
+        genre_hints = list(dict.fromkeys(genre_hints))
+        
+        self.logger.debug(
+            "Genre hints extracted",
+            genre_count=len(genre_hints),
+            genres=genre_hints
+        )
+        
+        return genre_hints
+    
+    def create_comprehensive_analysis(self, query: str) -> Dict[str, Any]:
+        """
+        Create comprehensive analysis combining all query analysis methods.
+        
+        Args:
+            query: User query text
+            
+        Returns:
+            Dictionary with comprehensive query analysis
+        """
+        # Ensure query is a string
+        if isinstance(query, dict):
+            query = query.get('query', str(query))
+        elif not isinstance(query, str):
+            query = str(query)
+            
+        analysis = {
+            'original_query': query,
+            'query_length': len(query),
+            'word_count': len(query.split())
+        }
+        
+        # Run all analysis methods
+        analysis['intent_analysis'] = self.analyze_query_intent(query)
+        analysis['complexity_analysis'] = self.analyze_query_complexity(query)
+        analysis['mood_indicators'] = self.extract_mood_indicators(query)
+        analysis['context_factors'] = self.extract_context_factors(query)
+        analysis['urgency_analysis'] = self.detect_urgency_level(query)
+        analysis['quality_preferences'] = self.detect_quality_preferences(query)
+        analysis['query_classification'] = self.classify_query_type(query)
+        analysis['genre_hints'] = self.extract_genre_hints(query)
+        
+        # Create summary
+        analysis['summary'] = {
+            'primary_intent': analysis['intent_analysis']['primary_intent'],
+            'complexity_level': analysis['complexity_analysis']['complexity_level'],
+            'urgency_level': analysis['urgency_analysis']['urgency_level'],
+            'query_type': analysis['query_classification']['primary_type'],
+            'has_mood_context': len(analysis['mood_indicators']) > 0,
+            'has_activity_context': len(analysis['context_factors']) > 0,
+            'has_genre_preferences': len(analysis['genre_hints']) > 0
+        }
+        
+        self.logger.info(
+            "Comprehensive query analysis completed",
+            primary_intent=analysis['summary']['primary_intent'],
+            complexity=analysis['summary']['complexity_level'],
+            query_type=analysis['summary']['query_type'],
+            total_indicators=len(analysis['mood_indicators']) + len(analysis['context_factors'])
+        )
+        
+        return analysis 

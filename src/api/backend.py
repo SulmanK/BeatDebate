@@ -2,7 +2,7 @@
 FastAPI Backend for BeatDebate Music Recommendation System
 
 This module provides REST API endpoints for the 4-agent music recommendation
-system, exposing the RecommendationEngine functionality via HTTP endpoints.
+system, exposing the Enhanced Recommendation Service functionality via HTTP endpoints.
 """
 
 import time
@@ -15,28 +15,34 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
-from ..services.recommendation_engine import (
-    RecommendationEngine, 
-    create_recommendation_engine
+# Updated imports to use new enhanced services
+from ..services.enhanced_recommendation_service import (
+    EnhancedRecommendationService,
+    RecommendationRequest as ServiceRequest,
+    RecommendationResponse as ServiceResponse,
+    get_recommendation_service
 )
-from ..models.recommendation_models import (
-    RecommendationResponse, 
-    TrackRecommendation
-)
+from ..services.api_service import get_api_service, close_api_service
+from ..services.cache_manager import get_cache_manager
+from ..services.smart_context_manager import SmartContextManager
 from ..models.agent_models import SystemConfig, AgentConfig
+from ..models.metadata_models import UnifiedTrackMetadata
 from .logging_middleware import LoggingMiddleware, PerformanceLoggingMiddleware
 
 # Setup logger - will be initialized after logging setup
 logger = None
 
-# Global engine instance
-recommendation_engine: Optional[RecommendationEngine] = None
+# Global service instances
+recommendation_service: Optional[EnhancedRecommendationService] = None
+api_service = None
+cache_manager = None
+context_manager = None
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Application lifespan manager for startup and shutdown."""
-    global recommendation_engine, logger
+    global recommendation_service, api_service, cache_manager, context_manager, logger
     
     # Initialize logging
     from ..utils.logging_config import setup_logging, get_logger
@@ -44,7 +50,7 @@ async def lifespan(app: FastAPI):
     logger = get_logger(__name__)
     
     # Startup
-    logger.info("Initializing BeatDebate recommendation engine...")
+    logger.info("Initializing BeatDebate enhanced recommendation service...")
     try:
         # Get API keys from environment variables with fallbacks
         gemini_api_key = os.getenv("GEMINI_API_KEY", "demo_gemini_key")
@@ -81,25 +87,42 @@ async def lifespan(app: FastAPI):
             }
         )
         
-        # Initialize recommendation engine using factory
-        recommendation_engine = await create_recommendation_engine(
-            system_config
+        # Initialize shared services
+        cache_manager = get_cache_manager()
+        api_service = get_api_service(cache_manager=cache_manager)
+        context_manager = SmartContextManager()
+        
+        # Initialize enhanced recommendation service
+        recommendation_service = get_recommendation_service(
+            system_config=system_config,
+            api_service=api_service,
+            cache_manager=cache_manager
         )
         
+        # Initialize agents within the service
+        await recommendation_service.initialize_agents()
+        
         logger.info(
-            "BeatDebate recommendation engine initialized successfully"
+            "BeatDebate enhanced recommendation service initialized successfully"
         )
     except Exception as e:
-        logger.error(f"Failed to initialize recommendation engine: {e}")
-        # For demo purposes, continue without the engine
-        logger.warning("Continuing without recommendation engine for demo")
-        recommendation_engine = None
+        logger.error(f"Failed to initialize recommendation service: {e}")
+        # For demo purposes, continue without the service
+        logger.warning("Continuing without recommendation service for demo")
+        recommendation_service = None
     
     yield
     
     # Shutdown
-    logger.info("Shutting down BeatDebate recommendation engine...")
-    recommendation_engine = None
+    logger.info("Shutting down BeatDebate recommendation service...")
+    if recommendation_service:
+        await recommendation_service.close()
+    if api_service:
+        await close_api_service()
+    recommendation_service = None
+    api_service = None
+    cache_manager = None
+    context_manager = None
 
 
 # Create FastAPI app
@@ -172,8 +195,8 @@ async def health_check():
         timestamp=time.time(),
         version="1.0.0",
         components={
-            "recommendation_engine": (
-                "active" if recommendation_engine else "inactive"
+            "recommendation_service": (
+                "active" if recommendation_service else "inactive"
             ),
             "lastfm_client": "configured",
             "spotify_client": "configured"
@@ -181,7 +204,7 @@ async def health_check():
     )
 
 
-@app.post("/recommendations", response_model=RecommendationResponse)
+@app.post("/recommendations", response_model=ServiceResponse)
 async def get_recommendations(request: RecommendationRequest):
     """
     Get music recommendations using the 4-agent system.
@@ -191,40 +214,41 @@ async def get_recommendations(request: RecommendationRequest):
     2. GenreMoodAgent and DiscoveryAgent execute searches
     3. JudgeAgent selects final recommendations
     """
-    if not recommendation_engine:
-        # Return demo response when engine is not available
+    if not recommendation_service:
+        # Return demo response when service is not available
         demo_tracks = [
-            TrackRecommendation(
-                title="Demo Track 1",
+            UnifiedTrackMetadata(
+                name="Demo Track 1",
                 artist="Demo Artist",
-                id="demo_1",
-                source="demo",
-                explanation="This is a demo recommendation",
-                confidence=0.85
+                recommendation_score=0.85,
+                recommendation_reason="This is a demo recommendation",
+                agent_source="demo"
             ),
-            TrackRecommendation(
-                title="Demo Track 2", 
+            UnifiedTrackMetadata(
+                name="Demo Track 2", 
                 artist="Demo Artist 2",
-                id="demo_2",
-                source="demo",
-                explanation="This is another demo recommendation",
-                confidence=0.78
+                recommendation_score=0.78,
+                recommendation_reason="This is another demo recommendation",
+                agent_source="demo"
             )
         ]
         
-        return RecommendationResponse(
+        return ServiceResponse(
             recommendations=demo_tracks,
-            reasoning_log=[
+            strategy_used={"type": "demo", "reason": "Service not available"},
+            reasoning=[
                 "Demo: PlannerAgent analyzed request",
                 "Demo: GenreMoodAgent found tracks",
                 "Demo: JudgeAgent selected recommendations"
             ],
-            agent_coordination_log=[
-                "Demo: Strategic planning completed",
-                "Demo: Agent coordination successful"
-            ],
             session_id=request.session_id or "demo_session",
-            response_time=1.5
+            processing_time=1.5,
+            metadata={
+                "demo_mode": True,
+                "agents_used": ["demo"],
+                "total_candidates": 2,
+                "final_count": 2
+            }
         )
     
     start_time = time.time()
@@ -233,18 +257,21 @@ async def get_recommendations(request: RecommendationRequest):
         logger.info(f"Processing recommendation request: {request.query}")
         
         # Execute recommendation workflow
-        result = await recommendation_engine.get_recommendations(
+        service_request = ServiceRequest(
             query=request.query,
             session_id=request.session_id,
             max_recommendations=request.max_recommendations,
-            chat_context=request.chat_context
+            include_audio_features=request.include_previews,
+            context=request.chat_context
         )
+        
+        result = await recommendation_service.get_recommendations(service_request)
         
         execution_time = time.time() - start_time
         logger.info(f"Recommendation completed in {execution_time:.2f}s")
         
-        # Add execution metadata
-        result.response_time = execution_time
+        # The result is already a ServiceResponse, just update metadata
+        result.processing_time = execution_time
         result.session_id = request.session_id or result.session_id
         
         return result
@@ -265,7 +292,7 @@ async def get_planning_strategy(request: RecommendationRequest):
     This endpoint is useful for demonstrating the PlannerAgent's strategic
     thinking process in the UI.
     """
-    if not recommendation_engine:
+    if not recommendation_service:
         # Return demo planning response
         demo_strategy = {
             "task_analysis": {
@@ -294,7 +321,7 @@ async def get_planning_strategy(request: RecommendationRequest):
         logger.info(f"Generating planning strategy for: {request.query}")
         
         # Get planning strategy from PlannerAgent
-        strategy = await recommendation_engine.get_planning_strategy(
+        strategy = await recommendation_service.get_planning_strategy(
             query=request.query,
             session_id=request.session_id
         )
@@ -320,10 +347,10 @@ async def get_planning_strategy(request: RecommendationRequest):
 @app.get("/sessions/{session_id}/history")
 async def get_session_history(session_id: str):
     """Get conversation history for a session."""
-    if not recommendation_engine:
+    if not recommendation_service:
         raise HTTPException(
             status_code=503, 
-            detail="Recommendation engine not available"
+            detail="Recommendation service not available"
         )
     
     try:
@@ -381,14 +408,14 @@ async def process_feedback(
 @app.get("/sessions/{session_id}/context")
 async def get_session_context(session_id: str):
     """Get smart context status for a session."""
-    if not recommendation_engine:
+    if not recommendation_service:
         raise HTTPException(
             status_code=503, 
-            detail="Recommendation engine not available"
+            detail="Recommendation service not available"
         )
     
     try:
-        context_summary = await recommendation_engine.smart_context_manager.get_context_summary(session_id)
+        context_summary = await recommendation_service.smart_context_manager.get_context_summary(session_id)
         return {
             "session_id": session_id,
             "context_summary": context_summary,

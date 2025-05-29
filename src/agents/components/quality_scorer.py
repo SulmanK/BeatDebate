@@ -399,8 +399,12 @@ class EngagementScorer:
         playcount = int(track_data.get('playcount') or 0)
         listeners = int(track_data.get('listeners') or 1)  # Avoid division by zero
         
+        # Ensure we don't divide by zero
+        if listeners == 0:
+            listeners = 1
+        
         # Calculate plays per listener
-        engagement_rate = playcount / listeners if listeners > 0 else 0
+        engagement_rate = playcount / listeners
         
         # Normalize to 0-1 scale (50 plays per listener = 1.0)
         normalized_rate = min(1.0, engagement_rate / 50.0)
@@ -716,4 +720,32 @@ class ComprehensiveQualityScorer:
         elif quality_score >= 0.4:
             return 'medium'
         else:
-            return 'low' 
+            return 'low'
+
+    async def calculate_quality_score(
+        self, 
+        track_data: Dict, 
+        entities: Dict[str, Any], 
+        intent_analysis: Dict[str, Any]
+    ) -> float:
+        """
+        Calculate quality score for a track (simplified version).
+        
+        Args:
+            track_data: Track metadata and features
+            entities: Extracted entities from PlannerAgent
+            intent_analysis: Intent analysis from PlannerAgent
+            
+        Returns:
+            Quality score (0.0 - 1.0)
+        """
+        try:
+            # Use the comprehensive calculation and return just the score
+            quality_result = await self.calculate_track_quality(
+                track_data, entities, intent_analysis
+            )
+            return quality_result['total_quality_score']
+            
+        except Exception as e:
+            self.logger.error("Quality score calculation failed", error=str(e))
+            return 0.5  # Default neutral score 

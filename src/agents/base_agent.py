@@ -35,47 +35,65 @@ class BaseAgent(ABC):
     """
     
     def __init__(
-        self, 
-        config: AgentConfig, 
-        llm_client=None, 
-        agent_name: str = None,
-        api_service=None,
-        metadata_service=None
+        self,
+        config: AgentConfig,
+        llm_client=None,
+        api_service: Optional["APIService"] = None,
+        metadata_service: Optional["MetadataService"] = None,
+        rate_limiter: Optional["UnifiedRateLimiter"] = None
     ):
         """
-        Initialize base agent with configuration and injected dependencies.
+        Initialize base agent with enhanced dependency injection.
         
         Args:
-            config: Agent configuration including LLM settings
-            llm_client: LLM client for this agent (optional)
-            agent_name: Override agent name (optional)
-            api_service: Injected API service (Phase 4 dependency injection)
-            metadata_service: Injected metadata service (Phase 4 dependency injection)
+            config: Agent configuration
+            llm_client: LLM client for text generation
+            api_service: API service for external data
+            metadata_service: Metadata service for track info
+            rate_limiter: Rate limiter for LLM API calls
         """
         self.config = config
-        self.agent_name = agent_name or config.agent_name
+        self.agent_name = config.agent_name
         self.agent_type = config.agent_type
-        self.logger = logger.bind(agent=self.agent_name)
         
-        # Initialize LLM client
+        # Core dependencies
         self.llm_client = llm_client
-        
-        # Phase 4: Dependency injection for services
         self.api_service = api_service
         self.metadata_service = metadata_service
+        self.rate_limiter = rate_limiter
+        
+        # Initialize LLM utilities with rate limiter
+        if self.llm_client:
+            try:
+                from .components.llm_utils import LLMUtils
+                self.llm_utils = LLMUtils(self.llm_client, rate_limiter=self.rate_limiter)
+            except ImportError:
+                from components.llm_utils import LLMUtils
+                self.llm_utils = LLMUtils(self.llm_client, rate_limiter=self.rate_limiter)
+        else:
+            self.llm_utils = None
+        
+        # Agent state
+        self.is_initialized = False
         
         # Performance tracking
-        self.processing_times: List[float] = []
+        self.processing_times = []
         self.success_count = 0
         self.error_count = 0
         
+        # Enhanced logging with agent context
+        self.logger = logger.bind(
+            agent=self.agent_name,
+            agent_type=self.agent_type,
+            has_api_service=bool(api_service),
+            has_metadata_service=bool(metadata_service),
+            llm_model=config.llm_model,
+            temperature=config.temperature
+        )
+        
         self.logger.info(
             "Agent initialized",
-            agent_type=self.agent_type,
-            llm_model=config.llm_model,
-            temperature=config.temperature,
-            has_api_service=api_service is not None,
-            has_metadata_service=metadata_service is not None
+            has_rate_limiter=bool(rate_limiter)
         )
     
     @abstractmethod

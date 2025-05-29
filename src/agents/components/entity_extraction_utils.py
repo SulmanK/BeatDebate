@@ -302,37 +302,69 @@ class EntityExtractionUtils:
         
         musical_entities = enhanced_entities['musical_entities']
         
-        # Validate and enhance artists
-        if 'artists' not in musical_entities:
-            musical_entities['artists'] = self.extract_artists_from_text(original_text)
-        else:
-            # Clean existing artist names
-            for category in ['primary', 'similar_to']:
-                if category in musical_entities['artists']:
-                    cleaned_artists = []
-                    for artist in musical_entities['artists'][category]:
-                        cleaned = self._clean_artist_name(artist)
-                        if cleaned and self._is_valid_artist_name(cleaned):
-                            cleaned_artists.append(cleaned)
-                    musical_entities['artists'][category] = cleaned_artists
+        # Helper to process entity categories (artists, genres, tracks, moods)
+        def process_entity_category(entity_type_plural: str, cleaner_func, validator_func):
+            if entity_type_plural not in musical_entities:
+                # If not present at all, extract fresh from original_text
+                if entity_type_plural == 'artists':
+                    musical_entities[entity_type_plural] = self.extract_artists_from_text(original_text)
+                elif entity_type_plural == 'genres':
+                    musical_entities[entity_type_plural] = self.extract_genres_from_text(original_text)
+                elif entity_type_plural == 'tracks':
+                    musical_entities[entity_type_plural] = self.extract_tracks_from_text(original_text)
+                elif entity_type_plural == 'moods':
+                    musical_entities[entity_type_plural] = self.extract_moods_from_text(original_text)
+            
+            # Now process/validate the entity categories
+            entity_categories_dict = musical_entities[entity_type_plural]
+            if isinstance(entity_categories_dict, dict):
+                for category_key in entity_categories_dict:
+                    current_items = entity_categories_dict[category_key]
+                    if isinstance(current_items, list):
+                        processed_item_list = []
+                        for item_entry in current_items:
+                            if isinstance(item_entry, str):
+                                # Simple string entry
+                                cleaned_name_str = cleaner_func(item_entry)
+                                if validator_func(cleaned_name_str):
+                                    processed_item_list.append(cleaned_name_str)
+                            elif isinstance(item_entry, dict):
+                                # Dict entry with possible confidence scores
+                                item_name_to_clean = item_entry.get('name')
+                                original_confidence = item_entry.get('confidence', 0.5)
+                                
+                                if isinstance(item_name_to_clean, str):
+                                    cleaned_name_str = cleaner_func(item_name_to_clean)
+                                    if validator_func(cleaned_name_str):
+                                        processed_item_list.append({
+                                            'name': cleaned_name_str,
+                                            'confidence': original_confidence 
+                                        })
+                                elif item_name_to_clean is None and isinstance(item_entry, dict):
+                                    self.logger.warning(f"{entity_type_plural} entry object is a dict but missing 'name'", entity_entry=item_entry)
+                                elif item_name_to_clean is not None:  # Should be string or None by now
+                                    self.logger.warning(f"Unexpected type for {entity_type_plural} name_to_clean", type_found=type(item_name_to_clean))
+                        entity_categories_dict[category_key] = processed_item_list
+                    else:
+                        self.logger.warning(f"Expected list for {entity_type_plural}.{category_key}, got {type(current_items)}")
         
-        # Validate and enhance genres
-        if 'genres' not in musical_entities:
-            musical_entities['genres'] = self.extract_genres_from_text(original_text)
+        # Process each entity type
+        process_entity_category('artists', self._clean_artist_name, self._is_valid_artist_name)
+        process_entity_category('genres', lambda x: x.strip().lower(), lambda x: len(x) > 1)  # Simpler cleaning for genres
+        process_entity_category('tracks', self._clean_track_name, self._is_valid_track_name)
         
-        # Validate and enhance moods
+        # Handle moods (they follow the same structure)
         if 'moods' not in musical_entities:
             musical_entities['moods'] = self.extract_moods_from_text(original_text)
-        
-        # Validate and enhance tracks
-        if 'tracks' not in musical_entities:
-            musical_entities['tracks'] = self.extract_tracks_from_text(original_text)
+        else:
+            # Process moods with basic cleaning
+            process_entity_category('moods', lambda x: x.strip().lower(), lambda x: len(x) > 1)
         
         # Add context information
         if 'context_factors' not in enhanced_entities:
             enhanced_entities['context_factors'] = self.extract_context_from_text(original_text)
         
-        # Add confidence scores
+        # Add confidence scores (this will convert remaining string items to dicts)
         enhanced_entities = self._add_confidence_scores(enhanced_entities, original_text)
         
         self.logger.debug(
@@ -452,43 +484,41 @@ class EntityExtractionUtils:
         
         musical_entities = entities.get('musical_entities', {})
         
-        # Add confidence to artists
-        if 'artists' in musical_entities:
-            for category in musical_entities['artists']:
-                for i, artist in enumerate(musical_entities['artists'][category]):
-                    # Higher confidence for longer, more specific artist names
-                    artist_confidence = base_confidence + (len(artist) / 100)
-                    musical_entities['artists'][category][i] = {
-                        'name': artist,
-                        'confidence': min(0.95, artist_confidence)
-                    }
+        # Helper function to process entity categories
+        def add_confidence_to_category(category_name: str, confidence_modifier: float = 1.0):
+            if category_name in musical_entities:
+                for category_key in musical_entities[category_name]:
+                    category_list = musical_entities[category_name][category_key]
+                    if isinstance(category_list, list):
+                        for i, item in enumerate(category_list):
+                            if isinstance(item, dict):
+                                # Item already has confidence, preserve it unless it's too low
+                                if item.get('confidence', 0) < 0.3:
+                                    item['confidence'] = base_confidence * confidence_modifier
+                            elif isinstance(item, str):
+                                # Convert string to dict with confidence
+                                item_confidence = base_confidence * confidence_modifier
+                                if category_name == 'artists':
+                                    # Higher confidence for longer, more specific artist names
+                                    item_confidence += (len(item) / 100)
+                                
+                                category_list[i] = {
+                                    'name': item,
+                                    'confidence': min(0.95, item_confidence)
+                                }
+                            else:
+                                # Handle unexpected item types
+                                self.logger.warning(
+                                    f"Unexpected item type in {category_name}.{category_key}",
+                                    item_type=type(item),
+                                    item=str(item)
+                                )
         
-        # Add confidence to genres
-        if 'genres' in musical_entities:
-            for category in musical_entities['genres']:
-                for i, genre in enumerate(musical_entities['genres'][category]):
-                    musical_entities['genres'][category][i] = {
-                        'name': genre,
-                        'confidence': base_confidence
-                    }
-        
-        # Add confidence to moods
-        if 'moods' in musical_entities:
-            for category in musical_entities['moods']:
-                for i, mood in enumerate(musical_entities['moods'][category]):
-                    musical_entities['moods'][category][i] = {
-                        'name': mood,
-                        'confidence': base_confidence
-                    }
-        
-        # Add confidence to tracks
-        if 'tracks' in musical_entities:
-            for category in musical_entities['tracks']:
-                for i, track in enumerate(musical_entities['tracks'][category]):
-                    musical_entities['tracks'][category][i] = {
-                        'name': track,
-                        'confidence': base_confidence
-                    }
+        # Add confidence to each entity type
+        add_confidence_to_category('artists', 1.0)
+        add_confidence_to_category('genres', 1.0)
+        add_confidence_to_category('moods', 1.0)
+        add_confidence_to_category('tracks', 1.0)
         
         return entities
     

@@ -37,22 +37,22 @@ class UnifiedCandidateGenerator:
         self.api_service = api_service
         self.logger = logger.bind(component="UnifiedCandidateGenerator")
         
-        # Default generation parameters
-        self.target_candidates = 100
+        # Default generation parameters - REDUCED for performance
+        self.target_candidates = 60  # Reduced from 100
         self.final_recommendations = 20
         
-        # Strategy configurations
+        # Strategy configurations - REDUCED for performance
         self.strategy_configs = {
             'genre_mood': {
-                'primary_search': 40,
-                'similar_artists': 30,
-                'genre_exploration': 20,
-                'underground_gems': 10
+                'primary_search': 25,      # Reduced from 40
+                'similar_artists': 20,     # Reduced from 30
+                'genre_exploration': 10,   # Reduced from 20
+                'underground_gems': 5      # Reduced from 10
             },
             'discovery': {
-                'multi_hop_similarity': 50,
-                'underground_detection': 30,
-                'serendipitous_discovery': 20
+                'multi_hop_similarity': 30,  # Reduced from 50
+                'underground_detection': 15, # Reduced from 30
+                'serendipitous_discovery': 10 # Reduced from 20
             }
         }
         
@@ -110,6 +110,11 @@ class UnifiedCandidateGenerator:
             all_candidates.extend(primary_tracks)
             self.logger.debug(f"Primary search: {len(primary_tracks)} tracks")
             
+            # Early termination check
+            if len(all_candidates) >= self.target_candidates:
+                self.logger.info("Early termination: sufficient candidates from primary search")
+                return self._finalize_candidates(all_candidates, "genre_mood")
+            
             # Source 2: Similar Artists
             similar_tracks = await self._get_similar_artist_tracks(
                 entities, intent_analysis,
@@ -117,6 +122,11 @@ class UnifiedCandidateGenerator:
             )
             all_candidates.extend(similar_tracks)
             self.logger.debug(f"Similar artists: {len(similar_tracks)} tracks")
+            
+            # Early termination check
+            if len(all_candidates) >= self.target_candidates:
+                self.logger.info("Early termination: sufficient candidates after similar artists")
+                return self._finalize_candidates(all_candidates, "genre_mood")
             
             # Source 3: Genre Exploration
             genre_tracks = await self._get_genre_exploration_tracks(
@@ -126,7 +136,12 @@ class UnifiedCandidateGenerator:
             all_candidates.extend(genre_tracks)
             self.logger.debug(f"Genre exploration: {len(genre_tracks)} tracks")
             
-            # Source 4: Underground Gems
+            # Early termination check
+            if len(all_candidates) >= self.target_candidates:
+                self.logger.info("Early termination: sufficient candidates after genre exploration")
+                return self._finalize_candidates(all_candidates, "genre_mood")
+            
+            # Source 4: Underground Gems (only if we still need more)
             underground_tracks = await self._get_underground_tracks(
                 entities, intent_analysis,
                 limit=strategy['underground_gems']
@@ -194,7 +209,7 @@ class UnifiedCandidateGenerator:
         self, 
         entities: Dict[str, Any], 
         intent_analysis: Dict[str, Any],
-        limit: int = 40
+        limit: int = 25
     ) -> List[Dict[str, Any]]:
         """Get tracks from primary search based on entities and intent."""
         tracks = []
@@ -202,14 +217,23 @@ class UnifiedCandidateGenerator:
         try:
             search_terms = self._extract_primary_search_terms(entities, intent_analysis)
             
-            for search_term in search_terms[:5]:
+            # OPTIMIZATION: Limit to max 3 search terms and use smaller requests
+            for search_term in search_terms[:3]:  # Reduced from 5 to 3
+                if len(tracks) >= limit:
+                    break
+                    
                 try:
+                    # Use smaller per-search limit 
+                    per_search_limit = min(10, (limit - len(tracks)))
                     search_results = await self.api_service.search_tracks(
                         query=search_term,
-                        limit=min(15, limit // len(search_terms) + 5)
+                        limit=per_search_limit
                     )
                     
                     for track_metadata in search_results:
+                        if len(tracks) >= limit:
+                            break
+                            
                         track = self._convert_metadata_to_dict(
                             track_metadata, 
                             source='primary_search',
@@ -217,9 +241,6 @@ class UnifiedCandidateGenerator:
                             search_term=search_term
                         )
                         tracks.append(track)
-                        
-                        if len(tracks) >= limit:
-                            break
                             
                 except Exception as e:
                     self.logger.warning(
@@ -227,9 +248,6 @@ class UnifiedCandidateGenerator:
                         error=str(e)
                     )
                     continue
-                
-                if len(tracks) >= limit:
-                    break
                     
         except Exception as e:
             self.logger.error("Primary search tracks failed", error=str(e))
@@ -240,7 +258,7 @@ class UnifiedCandidateGenerator:
         self, 
         entities: Dict[str, Any], 
         intent_analysis: Dict[str, Any],
-        limit: int = 30
+        limit: int = 20
     ) -> List[Dict[str, Any]]:
         """Get tracks from artists similar to those mentioned in entities."""
         tracks = []
@@ -251,14 +269,23 @@ class UnifiedCandidateGenerator:
             if not artists:
                 artists = self._get_fallback_artists(entities, intent_analysis)
             
-            for artist in artists[:5]:
+            # OPTIMIZATION: Limit to max 3 artists and use smaller requests
+            for artist in artists[:3]:  # Reduced from 5 to 3
+                if len(tracks) >= limit:
+                    break
+                    
                 try:
+                    # Use smaller per-artist limit
+                    per_artist_limit = min(8, (limit - len(tracks)))
                     artist_tracks = await self.api_service.get_artist_top_tracks(
                         artist=artist,
-                        limit=min(10, limit // len(artists) + 3)
+                        limit=per_artist_limit
                     )
                     
                     for track_metadata in artist_tracks:
+                        if len(tracks) >= limit:
+                            break
+                            
                         track = self._convert_metadata_to_dict(
                             track_metadata,
                             source='similar_artists',
@@ -266,9 +293,6 @@ class UnifiedCandidateGenerator:
                             source_artist=artist
                         )
                         tracks.append(track)
-                        
-                        if len(tracks) >= limit:
-                            break
                             
                 except Exception as e:
                     self.logger.warning(
@@ -276,9 +300,6 @@ class UnifiedCandidateGenerator:
                         error=str(e)
                     )
                     continue
-                
-                if len(tracks) >= limit:
-                    break
                     
         except Exception as e:
             self.logger.error("Similar artist tracks failed", error=str(e))
@@ -289,7 +310,7 @@ class UnifiedCandidateGenerator:
         self, 
         entities: Dict[str, Any], 
         intent_analysis: Dict[str, Any],
-        limit: int = 20
+        limit: int = 10
     ) -> List[Dict[str, Any]]:
         """Get tracks through genre/mood tag exploration."""
         tracks = []
@@ -297,14 +318,23 @@ class UnifiedCandidateGenerator:
         try:
             exploration_tags = self._extract_exploration_tags(entities, intent_analysis)
             
-            for tag in exploration_tags[:4]:
+            # OPTIMIZATION: Limit to max 2 tags and use smaller requests  
+            for tag in exploration_tags[:2]:  # Reduced from 4 to 2
+                if len(tracks) >= limit:
+                    break
+                    
                 try:
+                    # Use smaller per-tag limit
+                    per_tag_limit = min(5, (limit - len(tracks)))
                     tag_tracks = await self.api_service.get_tracks_by_tag(
                         tag=tag,
-                        limit=min(8, limit // len(exploration_tags) + 2)
+                        limit=per_tag_limit
                     )
                     
                     for track_metadata in tag_tracks:
+                        if len(tracks) >= limit:
+                            break
+                            
                         track = self._convert_metadata_to_dict(
                             track_metadata,
                             source='genre_exploration',
@@ -312,9 +342,6 @@ class UnifiedCandidateGenerator:
                             exploration_tag=tag
                         )
                         tracks.append(track)
-                        
-                        if len(tracks) >= limit:
-                            break
                             
                 except Exception as e:
                     self.logger.warning(
@@ -322,9 +349,6 @@ class UnifiedCandidateGenerator:
                         error=str(e)
                     )
                     continue
-                
-                if len(tracks) >= limit:
-                    break
                     
         except Exception as e:
             self.logger.error("Genre exploration tracks failed", error=str(e))
@@ -335,7 +359,7 @@ class UnifiedCandidateGenerator:
         self, 
         entities: Dict[str, Any], 
         intent_analysis: Dict[str, Any],
-        limit: int = 10
+        limit: int = 5
     ) -> List[Dict[str, Any]]:
         """Get underground/lesser-known tracks."""
         tracks = []
@@ -348,15 +372,24 @@ class UnifiedCandidateGenerator:
                 self.logger.debug("No underground terms found, skipping underground search")
                 return tracks
             
-            for term in underground_terms[:3]:
+            # OPTIMIZATION: Limit to max 2 terms and use smaller requests
+            for term in underground_terms[:2]:  # Reduced from 3 to 2
+                if len(tracks) >= limit:
+                    break
+                    
                 try:
+                    # Use smaller per-term limit
+                    per_term_limit = min(3, (limit - len(tracks)))
                     search_results = await self.api_service.search_tracks(
                         query=term,
-                        limit=min(5, limit // len(underground_terms) + 2)
+                        limit=per_term_limit
                     )
                     
                     # Filter for underground tracks (low play count)
                     for track_metadata in search_results:
+                        if len(tracks) >= limit:
+                            break
+                            
                         underground_score = self._calculate_underground_score(track_metadata)
                         if underground_score > 0.3:  # Threshold for "underground"
                             track = self._convert_metadata_to_dict(

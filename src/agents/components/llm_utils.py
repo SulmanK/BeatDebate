@@ -7,6 +7,7 @@ providing a single source of truth for LLM interactions.
 
 import json
 import re
+import asyncio
 from typing import Dict, Any, Optional, Union
 import structlog
 
@@ -22,16 +23,19 @@ class LLMUtils:
     - JSON response parsing
     - Error handling
     - Response cleaning and validation
+    - Rate limiting for API quota management
     """
     
-    def __init__(self, llm_client):
+    def __init__(self, llm_client, rate_limiter=None):
         """
-        Initialize LLM utilities with client.
+        Initialize LLM utilities with client and rate limiter.
         
         Args:
             llm_client: LLM client (e.g., Gemini client)
+            rate_limiter: Rate limiter for API quota management
         """
         self.llm_client = llm_client
+        self.rate_limiter = rate_limiter
         self.logger = logger.bind(component="LLMUtils")
     
     async def call_llm_with_json_response(
@@ -41,7 +45,7 @@ class LLMUtils:
         max_retries: int = 2
     ) -> Dict[str, Any]:
         """
-        Call LLM and parse JSON response with robust error handling.
+        Call LLM and parse JSON response with robust error handling and rate limiting.
         
         Args:
             user_prompt: User prompt for the LLM
@@ -57,8 +61,8 @@ class LLMUtils:
         """
         for attempt in range(max_retries + 1):
             try:
-                # Make LLM call
-                response_text = await self._make_llm_call(user_prompt, system_prompt)
+                # Make LLM call with rate limiting
+                response_text = await self._make_llm_call_with_rate_limiting(user_prompt, system_prompt)
                 
                 # Parse JSON response
                 json_data = self._parse_json_response(response_text)
@@ -87,10 +91,25 @@ class LLMUtils:
                         raise ValueError(f"Failed to parse JSON after {max_retries + 1} attempts: {e}")
                         
             except Exception as e:
+                error_msg = str(e)
+                if "429" in error_msg or "quota" in error_msg.lower() or "rate limit" in error_msg.lower():
+                    # Handle rate limiting with exponential backoff
+                    wait_time = min(60, 2 ** attempt)  # Cap at 60 seconds
+                    self.logger.warning(
+                        "Rate limit hit, waiting before retry",
+                        attempt=attempt + 1,
+                        wait_time=wait_time,
+                        error=error_msg
+                    )
+                    
+                    if attempt < max_retries:
+                        await asyncio.sleep(wait_time)
+                        continue
+                
                 self.logger.error(
                     "LLM call failed",
                     attempt=attempt + 1,
-                    error=str(e)
+                    error=error_msg
                 )
                 
                 if attempt == max_retries:
@@ -105,7 +124,7 @@ class LLMUtils:
         system_prompt: Optional[str] = None
     ) -> str:
         """
-        Call LLM and return raw text response.
+        Call LLM and return raw text response with rate limiting.
         
         Args:
             user_prompt: User prompt for the LLM
@@ -118,7 +137,7 @@ class LLMUtils:
             RuntimeError: If LLM call fails
         """
         try:
-            response_text = await self._make_llm_call(user_prompt, system_prompt)
+            response_text = await self._make_llm_call_with_rate_limiting(user_prompt, system_prompt)
             
             self.logger.debug(
                 "LLM text response received",
@@ -131,13 +150,13 @@ class LLMUtils:
             self.logger.error("LLM call failed", error=str(e))
             raise RuntimeError(f"LLM call failed: {e}")
     
-    async def _make_llm_call(
+    async def _make_llm_call_with_rate_limiting(
         self,
         user_prompt: str,
         system_prompt: Optional[str] = None
     ) -> str:
         """
-        Make actual LLM call with unified error handling.
+        Make LLM call with rate limiting and unified error handling.
         
         Args:
             user_prompt: User prompt
@@ -148,6 +167,10 @@ class LLMUtils:
         """
         if not self.llm_client:
             raise RuntimeError("LLM client not initialized")
+        
+        # Apply rate limiting if available
+        if self.rate_limiter:
+            await self.rate_limiter.wait_if_needed()
         
         try:
             # Combine system and user prompts

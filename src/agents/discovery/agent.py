@@ -45,7 +45,8 @@ class DiscoveryAgent(BaseAgent):
         config: AgentConfig,
         llm_client,
         api_service: APIService,
-        metadata_service: MetadataService
+        metadata_service: MetadataService,
+        rate_limiter=None
     ):
         """
         Initialize simplified discovery agent with injected dependencies.
@@ -55,25 +56,25 @@ class DiscoveryAgent(BaseAgent):
             llm_client: LLM client for reasoning
             api_service: Unified API service
             metadata_service: Unified metadata service
+            rate_limiter: Rate limiter for LLM API calls
         """
         super().__init__(
             config=config, 
             llm_client=llm_client, 
-            agent_name="DiscoveryAgent",
             api_service=api_service,
-            metadata_service=metadata_service
+            metadata_service=metadata_service,
+            rate_limiter=rate_limiter
         )
         
-        # Shared components
+        # Shared components (LLMUtils now initialized in parent with rate limiter)
         self.candidate_generator = UnifiedCandidateGenerator(api_service)
         self.quality_scorer = QualityScorer()
-        self.llm_utils = LLMUtils(llm_client)
         
         # Configuration
         self.target_candidates = 100
         self.final_recommendations = 20
-        self.quality_threshold = 0.5  # Lower threshold for discovery
-        self.novelty_threshold = 0.6
+        self.quality_threshold = 0.3   # Lowered from 0.5 for more permissive filtering
+        self.novelty_threshold = 0.4   # Lowered from 0.6 for more permissive filtering
         
         # Discovery parameters
         self.underground_bias = 0.7
@@ -351,7 +352,7 @@ class DiscoveryAgent(BaseAgent):
             underground_score = candidate.get('underground_score', 0)
             if underground_score is None:
                 underground_score = 0
-            if underground_score < (self.underground_bias * 0.5):
+            if underground_score < 0.2:
                 continue
             
             filtered.append(candidate)
@@ -438,36 +439,34 @@ class DiscoveryAgent(BaseAgent):
         intent_analysis: Dict[str, Any],
         rank: int
     ) -> str:
-        """Generate discovery-focused reasoning using shared LLM utils."""
+        """Generate reasoning for discovery recommendation."""
         try:
-            # Create discovery reasoning prompt
-            target_artists = self._extract_target_artists(entities)
-            target_genres = self._extract_target_genres(entities)
+            # For now, skip LLM calls to avoid rate limits - use fallback reasoning
+            return self._create_discovery_fallback_reasoning(candidate, entities, intent_analysis, rank)
             
-            # Ensure listeners is a valid number for formatting
-            listeners = candidate.get('listeners', 0)
-            if listeners is None:
-                listeners = 0
-            elif not isinstance(listeners, (int, float)):
-                try:
-                    listeners = int(listeners)
-                except (ValueError, TypeError):
-                    listeners = 0
-            
-            prompt = f"""Explain why "{candidate.get('name')}" by {candidate.get('artist')} is a great discovery.
-
-Target artists: {', '.join(target_artists) if target_artists else 'Open to discovery'}
-Target genres: {', '.join(target_genres) if target_genres else 'Any'}
-Track tags: {', '.join(candidate.get('tags', [])[:5])}
-Novelty score: {candidate.get('novelty_score', 0):.2f}
-Underground score: {candidate.get('underground_score', 0):.2f}
-Listeners: {listeners:,}
-Rank: #{rank}
-
-Provide a brief, engaging explanation (2-3 sentences) focusing on discovery value and uniqueness."""
-            
-            reasoning = await self.llm_utils.call_llm(prompt)
-            return reasoning.strip()
+            # # Disabled to prevent excessive API calls
+            # # Create comprehensive reasoning prompt
+            # target_artists = self._extract_target_artists(entities)
+            # target_genres = self._extract_target_genres(entities)
+            # 
+            # try:
+            #     listeners = int(candidate.get('listeners', 0))
+            # except (ValueError, TypeError):
+            #     listeners = 0
+            # 
+            # prompt = f"""Explain why "{candidate.get('name')}" by {candidate.get('artist')} is a great discovery.
+            # 
+            # Target artists: {', '.join(target_artists) if target_artists else 'Open to discovery'}
+            # Target genres: {', '.join(target_genres) if target_genres else 'Any'}
+            # Track tags: {', '.join(candidate.get('tags', [])[:5])}
+            # Novelty score: {candidate.get('novelty_score', 0):.2f}
+            # Listeners: {listeners:,}
+            # Rank: #{rank}
+            # 
+            # Provide a brief, engaging explanation (2-3 sentences) focusing on discovery value and uniqueness."""
+            # 
+            # reasoning = await self.llm_utils.call_llm(prompt)
+            # return reasoning.strip()
             
         except Exception as e:
             self.logger.debug(f"LLM reasoning failed, using fallback: {e}")

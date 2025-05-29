@@ -107,7 +107,7 @@ class EnhancedRecommendationService:
         self.logger.info("Enhanced Recommendation Service initialized")
     
     async def initialize_agents(self):
-        """Initialize agents with shared API service."""
+        """Initialize agents with shared API service and rate limiting."""
         if self._agents_initialized:
             return
         
@@ -116,7 +116,7 @@ class EnhancedRecommendationService:
             agent_config = AgentConfig(
                 agent_name="default",
                 agent_type="enhanced",
-                model_name="gemini-1.5-flash",
+                llm_model="gemini-2.0-flash-exp",
                 temperature=0.7,
                 max_tokens=1000
             )
@@ -128,6 +128,16 @@ class EnhancedRecommendationService:
             if not gemini_client:
                 self.logger.warning("Failed to create Gemini client, agents will have limited functionality")
             
+            # Create rate limiter for Gemini API (free tier: 10 requests per minute)
+            try:
+                from ..api.rate_limiter import UnifiedRateLimiter
+                gemini_rate_limiter = UnifiedRateLimiter.for_gemini(calls_per_minute=8)  # Conservative limit
+                self.logger.info("Gemini rate limiter created", calls_per_minute=8)
+            except ImportError:
+                from api.rate_limiter import UnifiedRateLimiter
+                gemini_rate_limiter = UnifiedRateLimiter.for_gemini(calls_per_minute=8)
+                self.logger.info("Gemini rate limiter created", calls_per_minute=8)
+            
             # Get shared clients from API service
             lastfm_client = await self.api_service.get_lastfm_client()
             
@@ -135,40 +145,44 @@ class EnhancedRecommendationService:
             from .metadata_service import MetadataService
             metadata_service = MetadataService(lastfm_client=lastfm_client)
             
-            # Initialize agents with Gemini client
+            # Initialize agents with Gemini client and rate limiter
             self.planner_agent = PlannerAgent(
                 config=agent_config,
                 llm_client=gemini_client,
                 api_service=self.api_service,
-                metadata_service=metadata_service
+                metadata_service=metadata_service,
+                rate_limiter=gemini_rate_limiter
             )
             
             self.genre_mood_agent = GenreMoodAgent(
                 config=agent_config,
                 llm_client=gemini_client,
                 api_service=self.api_service,
-                metadata_service=metadata_service
+                metadata_service=metadata_service,
+                rate_limiter=gemini_rate_limiter
             )
             
             self.discovery_agent = DiscoveryAgent(
                 config=agent_config,
                 llm_client=gemini_client,
                 api_service=self.api_service,
-                metadata_service=metadata_service
+                metadata_service=metadata_service,
+                rate_limiter=gemini_rate_limiter
             )
             
             self.judge_agent = JudgeAgent(
                 config=agent_config,
                 llm_client=gemini_client,
                 api_service=self.api_service,
-                metadata_service=metadata_service
+                metadata_service=metadata_service,
+                rate_limiter=gemini_rate_limiter
             )
             
             # Build workflow graph
             self.graph = self._build_workflow_graph()
             
             self._agents_initialized = True
-            self.logger.info("Agents initialized with shared API service")
+            self.logger.info("Agents initialized with shared API service and rate limiting")
             
         except Exception as e:
             self.logger.error("Failed to initialize agents", error=str(e))
@@ -299,9 +313,39 @@ class EnhancedRecommendationService:
             # Execute workflow
             final_state = await self.graph.ainvoke(initial_state)
             
+            # Debug: Check what's actually in the final state
+            self.logger.debug(f"Final state type: {type(final_state)}")
+            self.logger.debug(f"Final state attributes: {dir(final_state)}")
+            self.logger.debug(f"Final state dict: {final_state.__dict__ if hasattr(final_state, '__dict__') else 'No __dict__'}")
+            
+            # Try multiple ways to access final_recommendations
+            final_recommendations = None
+            if hasattr(final_state, 'final_recommendations'):
+                final_recommendations = final_state.final_recommendations
+                self.logger.debug(f"Found final_recommendations via hasattr: {len(final_recommendations) if final_recommendations else 'None'}")
+            else:
+                self.logger.warning("final_recommendations attribute not found in final_state")
+            
+            if final_recommendations is None:
+                final_recommendations = getattr(final_state, 'final_recommendations', [])
+                self.logger.debug(f"Found final_recommendations via getattr: {len(final_recommendations)}")
+            
+            if not final_recommendations:
+                # Fallback: check if recommendations are in other fields
+                all_possible_recs = []
+                for attr_name in ['final_recommendations', 'recommendations', 'genre_mood_recommendations', 'discovery_recommendations']:
+                    attr_value = getattr(final_state, attr_name, None)
+                    if attr_value:
+                        self.logger.debug(f"Found {len(attr_value)} items in {attr_name}")
+                        all_possible_recs.extend(attr_value)
+                
+                if all_possible_recs:
+                    self.logger.warning(f"Using fallback recommendations from other fields: {len(all_possible_recs)} items")
+                    final_recommendations = all_possible_recs
+            
             # Convert recommendations to unified metadata
             unified_recommendations = await self._convert_to_unified_metadata(
-                getattr(final_state, 'final_recommendations', []),
+                final_recommendations,
                 include_audio_features=request.include_audio_features
             )
             
@@ -361,14 +405,14 @@ class EnhancedRecommendationService:
     
     async def _convert_to_unified_metadata(
         self,
-        recommendations: List[Dict[str, Any]],
+        recommendations: List[Union[Dict[str, Any], "TrackRecommendation"]],
         include_audio_features: bool = True
     ) -> List[UnifiedTrackMetadata]:
         """
         Convert agent recommendations to unified metadata format.
         
         Args:
-            recommendations: Raw recommendations from agents
+            recommendations: Raw recommendations from agents (can be dicts or TrackRecommendation objects)
             include_audio_features: Whether to include Spotify audio features
             
         Returns:
@@ -378,11 +422,25 @@ class EnhancedRecommendationService:
         
         for rec in recommendations:
             try:
-                # Extract basic track info
-                artist = rec.get('artist', '')
-                track = rec.get('track', '')
+                # Handle both TrackRecommendation objects and dictionaries
+                if hasattr(rec, 'title'):  # TrackRecommendation object
+                    artist = rec.artist
+                    track = rec.title
+                    confidence = rec.confidence
+                    explanation = rec.explanation
+                    source = rec.source
+                elif isinstance(rec, dict):  # Dictionary format
+                    artist = rec.get('artist', '')
+                    track = rec.get('title', '') or rec.get('name', '')
+                    confidence = rec.get('confidence', 0.0)
+                    explanation = rec.get('explanation', '')
+                    source = rec.get('source', 'unknown')
+                else:
+                    self.logger.warning(f"Unknown recommendation format: {type(rec)}")
+                    continue
                 
                 if not artist or not track:
+                    self.logger.debug(f"Skipping recommendation missing artist/title: artist='{artist}', track='{track}'")
                     continue
                 
                 # Get comprehensive track info using API service
@@ -394,20 +452,27 @@ class EnhancedRecommendationService:
                 
                 if unified_track:
                     # Add recommendation-specific metadata
-                    unified_track.recommendation_score = rec.get('score', 0.0)
-                    unified_track.recommendation_reason = rec.get('reason', '')
-                    unified_track.agent_source = rec.get('agent', 'unknown')
+                    unified_track.recommendation_score = confidence
+                    unified_track.recommendation_reason = explanation
+                    unified_track.agent_source = source
                     
                     unified_tracks.append(unified_track)
+                    self.logger.debug(f"Successfully converted: {artist} - {track}")
+                else:
+                    self.logger.debug(f"Failed to get unified track info for {artist} - {track}")
                     
             except Exception as e:
+                artist_name = getattr(rec, 'artist', rec.get('artist', 'unknown')) if hasattr(rec, 'artist') or isinstance(rec, dict) else 'unknown'
+                track_name = getattr(rec, 'title', rec.get('title', rec.get('name', 'unknown'))) if hasattr(rec, 'title') or isinstance(rec, dict) else 'unknown'
                 self.logger.warning(
                     "Failed to convert recommendation to unified metadata",
-                    recommendation=rec,
+                    artist=artist_name,
+                    title=track_name,
                     error=str(e)
                 )
                 continue
         
+        self.logger.info(f"Converted {len(unified_tracks)} out of {len(recommendations)} recommendations to unified metadata")
         return unified_tracks
     
     async def _get_fallback_recommendations(
@@ -607,7 +672,7 @@ def create_gemini_client(api_key: str):
         genai.configure(api_key=api_key)
         
         # Create and return the model
-        model = genai.GenerativeModel('gemini-1.5-flash')
+        model = genai.GenerativeModel('gemini-2.0-flash-exp')
         
         logger.info("Gemini client created successfully")
         return model

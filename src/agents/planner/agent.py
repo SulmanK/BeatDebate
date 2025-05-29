@@ -48,7 +48,8 @@ class PlannerAgent(BaseAgent):
         config,
         llm_client,
         api_service: APIService,
-        metadata_service: MetadataService
+        metadata_service: MetadataService,
+        rate_limiter=None
     ):
         """
         Initialize simplified planner agent with injected dependencies.
@@ -58,23 +59,23 @@ class PlannerAgent(BaseAgent):
             llm_client: LLM client for query understanding
             api_service: Unified API service
             metadata_service: Unified metadata service
+            rate_limiter: Rate limiter for LLM API calls
         """
         super().__init__(
             config=config, 
             llm_client=llm_client, 
-            agent_name="PlannerAgent",
             api_service=api_service,
-            metadata_service=metadata_service
+            metadata_service=metadata_service,
+            rate_limiter=rate_limiter
+        )
+        
+        # Specialized components (LLMUtils now initialized in parent with rate limiter)
+        self.query_understanding_engine = QueryUnderstandingEngine(
+            llm_client, rate_limiter=rate_limiter
         )
         
         # Shared utilities
-        self.llm_utils = LLMUtils(llm_client)
         self.query_utils = QueryAnalysisUtils()
-        
-        # Specialized components
-        self.query_understanding_engine = QueryUnderstandingEngine(
-            llm_client
-        )
         
         self.logger.info(
             "Simplified PlannerAgent initialized with dependency injection"

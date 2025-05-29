@@ -45,7 +45,8 @@ class GenreMoodAgent(BaseAgent):
         config: AgentConfig,
         llm_client,
         api_service: APIService,
-        metadata_service: MetadataService
+        metadata_service: MetadataService,
+        rate_limiter=None
     ):
         """
         Initialize simplified genre mood agent with injected dependencies.
@@ -55,24 +56,24 @@ class GenreMoodAgent(BaseAgent):
             llm_client: LLM client for reasoning
             api_service: Unified API service
             metadata_service: Unified metadata service
+            rate_limiter: Rate limiter for LLM API calls
         """
         super().__init__(
             config=config, 
             llm_client=llm_client, 
-            agent_name="GenreMoodAgent",
             api_service=api_service,
-            metadata_service=metadata_service
+            metadata_service=metadata_service,
+            rate_limiter=rate_limiter
         )
         
-        # Shared components
+        # Shared components (LLMUtils now initialized in parent with rate limiter)
         self.candidate_generator = UnifiedCandidateGenerator(api_service)
         self.quality_scorer = QualityScorer()
-        self.llm_utils = LLMUtils(llm_client)
         
         # Configuration
         self.target_candidates = 100
         self.final_recommendations = 20
-        self.quality_threshold = 0.6
+        self.quality_threshold = 0.4
         
         # Mood and genre mappings
         self.mood_mappings = self._initialize_mood_mappings()
@@ -180,7 +181,7 @@ class GenreMoodAgent(BaseAgent):
         intent_analysis: Dict[str, Any]
     ) -> float:
         """Calculate genre/mood specific relevance score."""
-        score = 0.0
+        score = 0.2  # Start with base score instead of 0.0
         
         # Extract candidate information
         candidate_tags = candidate.get('tags', [])
@@ -210,6 +211,13 @@ class GenreMoodAgent(BaseAgent):
             if any(energy_tag.lower() in tag.lower() for tag in candidate_tags):
                 score += 0.3
         
+        # Bonus for having any relevant tags (very liberal matching)
+        common_music_tags = ['rock', 'indie', 'electronic', 'pop', 'alternative', 'experimental', 'ambient']
+        for tag in candidate_tags:
+            if any(music_tag in tag.lower() for music_tag in common_music_tags):
+                score += 0.1
+                break  # Only add bonus once
+        
         return min(score, 1.0)
     
     async def _filter_by_genre_mood_relevance(
@@ -221,16 +229,30 @@ class GenreMoodAgent(BaseAgent):
         """Filter candidates by genre/mood relevance and quality threshold."""
         filtered = []
         
-        for candidate in scored_candidates:
-            # Quality threshold check
-            if candidate.get('quality_score', 0) < self.quality_threshold:
+        self.logger.debug(f"Filtering {len(scored_candidates)} candidates with quality_threshold={self.quality_threshold}")
+        
+        for i, candidate in enumerate(scored_candidates):
+            quality_score = candidate.get('quality_score', 0)
+            genre_mood_score = candidate.get('genre_mood_score', 0)
+            
+            self.logger.debug(
+                f"Candidate {i+1}: {candidate.get('name', 'Unknown')} by {candidate.get('artist', 'Unknown')}, "
+                f"quality={quality_score:.3f}, genre_mood={genre_mood_score:.3f}"
+            )
+            
+            # Very relaxed quality threshold for genre/mood agent
+            if quality_score < 0.2:  # Reduced from max(0.3, self.quality_threshold * 0.7)
+                self.logger.debug(f"Filtered out {candidate.get('name')}: quality too low ({quality_score:.3f} < 0.2)")
                 continue
             
-            # Genre/mood relevance check
-            if candidate.get('genre_mood_score', 0) < 0.3:
+            # Very relaxed genre/mood relevance check - accept almost anything
+            if genre_mood_score < 0.05:  # Reduced from 0.1 to 0.05
+                self.logger.debug(f"Filtered out {candidate.get('name')}: genre/mood score too low ({genre_mood_score:.3f} < 0.05)")
                 continue
             
             filtered.append(candidate)
+        
+        self.logger.info(f"Genre/mood filtering: {len(scored_candidates)} -> {len(filtered)} candidates")
         
         # Ensure diversity in sources and artists
         filtered = self._ensure_diversity(filtered)
@@ -302,25 +324,28 @@ class GenreMoodAgent(BaseAgent):
         intent_analysis: Dict[str, Any],
         rank: int
     ) -> str:
-        """Generate reasoning for recommendation using shared LLM utils."""
+        """Generate reasoning for genre/mood recommendation."""
         try:
-            # Create reasoning prompt
-            target_genres = self._extract_target_genres(entities)
-            target_moods = self._extract_target_moods(entities, intent_analysis)
+            # For now, skip LLM calls to avoid rate limits - use fallback reasoning
+            return self._create_fallback_reasoning(candidate, entities, intent_analysis, rank)
             
-            prompt = f"""Explain why "{candidate.get('name')}" by {candidate.get('artist')} is a good recommendation.
-
-Target genres: {', '.join(target_genres) if target_genres else 'Any'}
-Target moods: {', '.join(target_moods) if target_moods else 'Any'}
-Track tags: {', '.join(candidate.get('tags', [])[:5])}
-Quality score: {candidate.get('quality_score', 0):.2f}
-Genre/mood score: {candidate.get('genre_mood_score', 0):.2f}
-Rank: #{rank}
-
-Provide a brief, engaging explanation (2-3 sentences) focusing on genre and mood match."""
-            
-            reasoning = await self.llm_utils.call_llm(prompt)
-            return reasoning.strip()
+            # # Disabled to prevent excessive API calls
+            # # Create reasoning prompt
+            # target_genres = self._extract_target_genres(entities)
+            # target_moods = self._extract_target_moods(entities, intent_analysis)
+            # 
+            # prompt = f"""Explain why "{candidate.get('name')}" by {candidate.get('artist')} is a good recommendation.
+            # 
+            # Target genres: {', '.join(target_genres) if target_genres else 'Any'}
+            # Target moods: {', '.join(target_moods) if target_moods else 'Any'}
+            # Track tags: {', '.join(candidate.get('tags', [])[:3])}
+            # Quality score: {candidate.get('quality_score', 0):.2f}
+            # Rank: #{rank}
+            # 
+            # Provide a brief, engaging explanation (2-3 sentences) focusing on genre and mood match."""
+            # 
+            # reasoning = await self.llm_utils.call_llm(prompt)
+            # return reasoning.strip()
             
         except Exception as e:
             self.logger.debug(f"LLM reasoning failed, using fallback: {e}")

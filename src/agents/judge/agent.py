@@ -43,7 +43,8 @@ class JudgeAgent(BaseAgent):
         config: AgentConfig,
         llm_client,
         api_service: APIService,
-        metadata_service: MetadataService
+        metadata_service: MetadataService,
+        rate_limiter=None
     ):
         """
         Initialize simplified judge agent with injected dependencies.
@@ -53,25 +54,25 @@ class JudgeAgent(BaseAgent):
             llm_client: LLM client for explanations
             api_service: Unified API service
             metadata_service: Unified metadata service
+            rate_limiter: Rate limiter for LLM API calls
         """
         super().__init__(
             config=config, 
             llm_client=llm_client, 
-            agent_name="JudgeAgent",
             api_service=api_service,
-            metadata_service=metadata_service
+            metadata_service=metadata_service,
+            rate_limiter=rate_limiter
         )
         
-        # Shared components
+        # Shared components (LLMUtils now initialized in parent with rate limiter)
         self.quality_scorer = QualityScorer()
-        self.llm_utils = LLMUtils(llm_client)
         
         # Configuration
         self.final_recommendations = 20
         self.diversity_targets = {
             'max_per_artist': 2,
             'min_genres': 3,
-            'source_distribution': {'genre_mood': 0.4, 'discovery': 0.4, 'planner': 0.2}
+            'source_distribution': {'genre_mood_agent': 0.4, 'discovery_agent': 0.4, 'planner_agent': 0.2}
         }
         
         self.logger.info("Simplified JudgeAgent initialized with dependency injection")
@@ -111,8 +112,37 @@ class JudgeAgent(BaseAgent):
             # Phase 4: Generate enhanced explanations
             final_recommendations = await self._generate_explanations(final_selections, state)
             
-            # Update state
-            state.final_recommendations = [rec.model_dump() for rec in final_recommendations]
+            # CRITICAL: Ensure proper state update for LangGraph
+            # Convert to dict format for state storage
+            final_recommendations_dicts = [rec.model_dump() for rec in final_recommendations]
+            
+            # Create a new state object to ensure proper propagation
+            updated_state = MusicRecommenderState(
+                # Copy all existing fields
+                user_query=state.user_query,
+                session_id=state.session_id,
+                max_recommendations=state.max_recommendations,
+                planning_strategy=state.planning_strategy,
+                execution_plan=state.execution_plan,
+                coordination_strategy=state.coordination_strategy,
+                agent_coordination=state.agent_coordination,
+                entities=state.entities,
+                intent_analysis=state.intent_analysis,
+                query_understanding=state.query_understanding,
+                conversation_context=state.conversation_context,
+                entity_reasoning=state.entity_reasoning,
+                context_decision=state.context_decision,
+                genre_mood_recommendations=state.genre_mood_recommendations,
+                discovery_recommendations=state.discovery_recommendations,
+                reasoning_log=state.reasoning_log,
+                agent_deliberations=state.agent_deliberations,
+                error_info=state.error_info,
+                processing_start_time=state.processing_start_time,
+                total_processing_time=state.total_processing_time,
+                confidence=state.confidence,
+                # Set the critical final_recommendations field
+                final_recommendations=final_recommendations_dicts
+            )
             
             self.logger.info(
                 "Judge agent processing completed",
@@ -120,7 +150,10 @@ class JudgeAgent(BaseAgent):
                 final_recommendations=len(final_recommendations)
             )
             
-            return state
+            # Verify the field is set
+            self.logger.debug(f"Returning state with final_recommendations: {len(updated_state.final_recommendations)}")
+            
+            return updated_state
             
         except Exception as e:
             self.logger.error("Judge agent processing failed", error=str(e))
@@ -154,7 +187,7 @@ class JudgeAgent(BaseAgent):
         seen_tracks = set()
         
         for candidate in all_candidates:
-            track_key = f"{candidate.artist.lower()}::{candidate.name.lower()}"
+            track_key = f"{candidate.artist.lower()}::{candidate.title.lower()}"
             if track_key not in seen_tracks:
                 seen_tracks.add(track_key)
                 unique_candidates.append(candidate)
@@ -197,7 +230,7 @@ class JudgeAgent(BaseAgent):
                 scored_candidates.append((candidate, scores))
                 
             except Exception as e:
-                self.logger.warning(f"Failed to score candidate {candidate.name}: {e}")
+                self.logger.warning(f"Failed to score candidate {candidate.title}: {e}")
                 continue
         
         return scored_candidates
@@ -212,11 +245,11 @@ class JudgeAgent(BaseAgent):
         try:
             # Convert TrackRecommendation to dict for quality scorer
             candidate_dict = {
-                'name': candidate.name,
+                'name': candidate.title,
                 'artist': candidate.artist,
-                'album': candidate.album,
-                'tags': candidate.tags,
-                'url': candidate.url,
+                'album': candidate.album_title,
+                'tags': candidate.moods,
+                'url': candidate.track_url,
                 'listeners': getattr(candidate, 'listeners', 0),
                 'playcount': getattr(candidate, 'playcount', 0)
             }
@@ -226,7 +259,7 @@ class JudgeAgent(BaseAgent):
             )
             
         except Exception as e:
-            self.logger.debug(f"Quality scoring failed for {candidate.name}: {e}")
+            self.logger.debug(f"Quality scoring failed for {candidate.title}: {e}")
             return 0.5  # Default score
     
     def _calculate_contextual_relevance(
@@ -248,7 +281,7 @@ class JudgeAgent(BaseAgent):
         
         # Mood relevance
         target_moods = self._extract_target_moods(entities, intent_analysis)
-        candidate_tags = [tag.lower() for tag in candidate.tags]
+        candidate_tags = [tag.lower() for tag in candidate.moods]
         
         for target_mood in target_moods:
             if any(target_mood.lower() in tag for tag in candidate_tags):
@@ -275,7 +308,7 @@ class JudgeAgent(BaseAgent):
             # Favor tracks with novelty indicators
             if candidate.source == 'discovery_agent':
                 return 0.8
-            elif 'underground' in candidate.tags or 'hidden_gem' in candidate.tags:
+            elif 'underground' in candidate.moods or 'hidden_gem' in candidate.moods:
                 return 0.7
             else:
                 return 0.5
@@ -289,7 +322,7 @@ class JudgeAgent(BaseAgent):
         
         elif primary_intent == 'similarity':
             # Favor tracks with similarity indicators
-            if 'similar' in candidate.reasoning.lower():
+            if hasattr(candidate, 'explanation') and candidate.explanation and 'similar' in candidate.explanation.lower():
                 return 0.8
             else:
                 return 0.6
@@ -324,7 +357,7 @@ class JudgeAgent(BaseAgent):
         
         # Unique tags bonus
         unique_tags = ['experimental', 'underground', 'rare', 'hidden_gem', 'cult']
-        if any(tag in candidate.tags for tag in unique_tags):
+        if any(tag in candidate.moods for tag in unique_tags):
             score += 0.2
         
         return min(score, 1.0)
@@ -355,16 +388,30 @@ class JudgeAgent(BaseAgent):
         genre_counts = {}
         source_counts = {}
         
-        for candidate, scores in ranked_candidates:
+        self.logger.debug(f"Starting diversity selection with {len(ranked_candidates)} candidates")
+        
+        for i, (candidate, scores) in enumerate(ranked_candidates):
+            self.logger.debug(
+                f"Evaluating candidate {i+1}: {candidate.title} by {candidate.artist}, "
+                f"source={candidate.source}, score={scores.get('combined_score', 0):.3f}"
+            )
+            
             # Check artist diversity
             if artist_counts.get(candidate.artist, 0) >= self.diversity_targets['max_per_artist']:
+                self.logger.debug(f"Skipping {candidate.title}: too many tracks from {candidate.artist}")
                 continue
             
             # Check source distribution
             source_count = source_counts.get(candidate.source, 0)
             max_per_source = int(self.final_recommendations * 
                                self.diversity_targets['source_distribution'].get(candidate.source, 0.3))
+            
+            self.logger.debug(
+                f"Source check: {candidate.source} count={source_count}, max={max_per_source}"
+            )
+            
             if source_count >= max_per_source:
+                self.logger.debug(f"Skipping {candidate.title}: source quota exceeded for {candidate.source}")
                 continue
             
             # Add to selection
@@ -376,14 +423,17 @@ class JudgeAgent(BaseAgent):
             for genre in candidate.genres:
                 genre_counts[genre] = genre_counts.get(genre, 0) + 1
             
+            self.logger.debug(f"Selected {candidate.title} (total selected: {len(selected)})")
+            
             # Stop when we have enough
             if len(selected) >= self.final_recommendations:
                 break
         
-        self.logger.debug(
+        self.logger.info(
             f"Selected {len(selected)} recommendations with diversity",
             artist_distribution=dict(artist_counts),
-            source_distribution=dict(source_counts)
+            source_distribution=dict(source_counts),
+            diversity_targets=self.diversity_targets
         )
         
         return selected
@@ -396,77 +446,29 @@ class JudgeAgent(BaseAgent):
         """Generate enhanced explanations for final selections."""
         enhanced_selections = []
         
-        entities = state.entities or {}
-        intent_analysis = state.intent_analysis or {}
-        
+        # For now, skip individual LLM calls to avoid rate limits
+        # Use existing explanations or create simple ones
         for i, recommendation in enumerate(selections):
             try:
-                # Generate enhanced reasoning using shared LLM utils
-                enhanced_reasoning = await self._generate_enhanced_reasoning(
-                    recommendation, entities, intent_analysis, i + 1
-                )
+                # Use existing explanation or create a simple one
+                if not recommendation.explanation or len(recommendation.explanation.strip()) < 10:
+                    recommendation.explanation = self._create_fallback_reasoning(
+                        recommendation, 
+                        state.entities or {}, 
+                        state.intent_analysis or {}, 
+                        i + 1
+                    )
                 
-                # Update recommendation with enhanced reasoning
-                enhanced_rec = TrackRecommendation(
-                    name=recommendation.name,
-                    artist=recommendation.artist,
-                    album=recommendation.album,
-                    url=recommendation.url,
-                    genres=recommendation.genres,
-                    tags=recommendation.tags,
-                    confidence=recommendation.confidence,
-                    reasoning=enhanced_reasoning,
-                    source=recommendation.source,
-                    rank=i + 1
-                )
-                
-                enhanced_selections.append(enhanced_rec)
+                recommendation.rank = i + 1
+                enhanced_selections.append(recommendation)
                 
             except Exception as e:
-                self.logger.warning(f"Failed to enhance reasoning for {recommendation.name}: {e}")
+                self.logger.warning(f"Failed to enhance reasoning for {recommendation.title}: {e}")
                 # Use original recommendation with updated rank
                 recommendation.rank = i + 1
                 enhanced_selections.append(recommendation)
         
         return enhanced_selections
-    
-    async def _generate_enhanced_reasoning(
-        self,
-        recommendation: TrackRecommendation,
-        entities: Dict[str, Any],
-        intent_analysis: Dict[str, Any],
-        rank: int
-    ) -> str:
-        """Generate enhanced reasoning using shared LLM utils."""
-        try:
-            # Create comprehensive reasoning prompt
-            target_genres = self._extract_target_genres(entities)
-            target_moods = self._extract_target_moods(entities, intent_analysis)
-            primary_intent = intent_analysis.get('primary_intent', 'discovery')
-            
-            prompt = f"""Create an engaging explanation for why "{recommendation.name}" by {recommendation.artist} is ranked #{rank}.
-
-User Intent: {primary_intent}
-Target Genres: {', '.join(target_genres) if target_genres else 'Open to any'}
-Target Moods: {', '.join(target_moods) if target_moods else 'Any mood'}
-Track Genres: {', '.join(recommendation.genres)}
-Track Tags: {', '.join(recommendation.tags)}
-Source Agent: {recommendation.source}
-Original Reasoning: {recommendation.reasoning}
-
-Create a conversational, engaging explanation (2-3 sentences) that:
-1. Explains why this track fits the user's request
-2. Highlights what makes it special or interesting
-3. Uses natural, enthusiastic language
-
-Focus on the musical qualities and why the user would enjoy this recommendation."""
-            
-            enhanced_reasoning = await self.llm_utils.call_llm(prompt)
-            return enhanced_reasoning.strip()
-            
-        except Exception as e:
-            self.logger.debug(f"LLM reasoning failed, using fallback: {e}")
-            return self._create_fallback_reasoning(recommendation, entities, intent_analysis, rank)
     
     def _create_fallback_reasoning(
         self,
@@ -476,7 +478,7 @@ Focus on the musical qualities and why the user would enjoy this recommendation.
         rank: int
     ) -> str:
         """Create fallback reasoning when LLM is unavailable."""
-        reasoning_parts = [f"#{rank}: {recommendation.name} by {recommendation.artist}"]
+        reasoning_parts = [f"#{rank}: {recommendation.title} by {recommendation.artist}"]
         
         # Add genre information
         if recommendation.genres:

@@ -130,6 +130,10 @@ class TrackRecommendation(BaseModel):
     # )
 
     # --- Fields to be populated by the JudgeAgent ---
+    rank: Optional[int] = Field(
+        None, 
+        description="The ranking position assigned by the JudgeAgent (1-based)."
+    )
     judge_score: Optional[float] = Field(
         None, 
         description="The final weighted score assigned by the JudgeAgent."

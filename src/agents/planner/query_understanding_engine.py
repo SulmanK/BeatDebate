@@ -27,48 +27,62 @@ class QueryUnderstandingEngine:
     - QueryAnalysisUtils for query analysis
     """
     
-    def __init__(self, llm_client):
+    def __init__(self, llm_client, rate_limiter=None):
         """
         Initialize query understanding engine.
         
         Args:
-            llm_client: LLM client for query understanding
+            llm_client: LLM client for query analysis
+            rate_limiter: Rate limiter for LLM API calls
         """
-        self.llm_utils = LLMUtils(llm_client)
-        self.entity_utils = EntityExtractionUtils()
-        self.query_utils = QueryAnalysisUtils()
+        self.llm_client = llm_client
         self.logger = logger.bind(component="QueryUnderstandingEngine")
         
-        # System prompt for LLM-based understanding
-        self.system_prompt = """You are an expert music recommendation query analyzer. 
-Your task is to understand user queries about music and extract structured information.
+        # Initialize shared LLM utilities with rate limiter
+        try:
+            from ..components.llm_utils import LLMUtils
+            self.llm_utils = LLMUtils(llm_client, rate_limiter=rate_limiter)
+        except ImportError:
+            from components.llm_utils import LLMUtils
+            self.llm_utils = LLMUtils(llm_client, rate_limiter=rate_limiter)
+        
+        # Initialize entity extraction utils
+        try:
+            from ..components.entity_extraction_utils import EntityExtractionUtils
+            self.entity_utils = EntityExtractionUtils()
+        except ImportError:
+            from components.entity_extraction_utils import EntityExtractionUtils
+            self.entity_utils = EntityExtractionUtils()
+        
+        # Initialize query analysis utilities
+        try:
+            from ..components.query_analysis_utils import QueryAnalysisUtils
+            self.query_utils = QueryAnalysisUtils()
+        except ImportError:
+            from components.query_analysis_utils import QueryAnalysisUtils
+            self.query_utils = QueryAnalysisUtils()
+        
+        # Define system prompt for LLM-based understanding
+        self.system_prompt = """You are a music query understanding assistant. Analyze user queries about music recommendations and extract structured information.
 
-Analyze the query and return a JSON object with the following structure:
+Return a JSON object with this exact structure:
 {
-    "intent": "discovery|similarity|mood_based|activity_based|genre_specific",
-    "similarity_type": "exact|moderate|loose|null",
+    "intent": "discovery|mood_based|activity_based|genre_specific|similarity",
     "musical_entities": {
-        "artists": {
-            "primary": ["artist1", "artist2"],
-            "similar_to": ["artist3", "artist4"]
-        },
-        "genres": {
-            "primary": ["genre1", "genre2"],
-            "secondary": ["genre3"]
-        },
-        "tracks": {
-            "primary": ["track1", "track2"]
-        },
-        "moods": {
-            "primary": ["mood1", "mood2"]
-        }
+        "artists": ["artist1", "artist2"],
+        "genres": ["genre1", "genre2"], 
+        "tracks": ["track1", "track2"],
+        "moods": ["mood1", "mood2"]
     },
-    "context_factors": ["factor1", "factor2"],
+    "context_factors": ["context1", "context2"],
     "complexity_level": "simple|medium|complex",
-    "confidence": 0.0-1.0
+    "similarity_type": "light|moderate|strong",
+    "confidence": 0.8
 }
 
-Focus on extracting clear, actionable information for music recommendation."""
+Be specific about genres (use specific subgenres when possible).
+Extract moods from emotional language in the query.
+Identify context factors like activities, time of day, social situations."""
     
     async def understand_query(
         self, 
@@ -238,7 +252,16 @@ Remember to return ONLY the JSON object with no additional text."""
             # Extract and validate intent
             intent_str = analysis.get('intent', 'discovery')
             try:
-                intent = QueryIntent(intent_str)
+                # Map common intent values to valid enum values
+                intent_mapping = {
+                    'discovery': 'DISCOVERY',
+                    'similarity': 'DISCOVERY',  # Map similarity to discovery for now
+                    'mood_based': 'MOOD_BASED',
+                    'activity_based': 'ACTIVITY_BASED',
+                    'genre_specific': 'GENRE_BASED'
+                }
+                mapped_intent = intent_mapping.get(intent_str.lower(), 'DISCOVERY')
+                intent = QueryIntent(mapped_intent)
             except ValueError:
                 self.logger.warning("Invalid intent", intent=intent_str)
                 intent = QueryIntent.DISCOVERY
@@ -247,7 +270,16 @@ Remember to return ONLY the JSON object with no additional text."""
             similarity_type = None
             if analysis.get('similarity_type'):
                 try:
-                    similarity_type = SimilarityType(analysis['similarity_type'])
+                    # Map similarity types to valid enum values
+                    similarity_mapping = {
+                        'exact': 'STYLISTIC',
+                        'moderate': 'GENRE', 
+                        'loose': 'MOOD'
+                    }
+                    similarity_str = analysis.get('similarity_type')
+                    mapped_similarity = similarity_mapping.get(similarity_str.lower(), None)
+                    if mapped_similarity:
+                        similarity_type = SimilarityType(mapped_similarity)
                 except ValueError:
                     self.logger.warning("Invalid similarity_type", similarity_type=analysis['similarity_type'])
             

@@ -70,7 +70,7 @@ class GenreMoodAgent(BaseAgent):
         self.candidate_generator = UnifiedCandidateGenerator(api_service)
         self.quality_scorer = QualityScorer()
         
-        # Configuration
+        # Base configuration - will be adapted based on intent
         self.target_candidates = 100
         self.final_recommendations = 20
         self.quality_threshold = 0.4
@@ -79,7 +79,80 @@ class GenreMoodAgent(BaseAgent):
         self.mood_mappings = self._initialize_mood_mappings()
         self.energy_mappings = self._initialize_energy_mappings()
         
-        self.logger.info("Simplified GenreMoodAgent initialized with dependency injection")
+        # Intent-specific parameter configurations from design document
+        self.intent_parameters = {
+            'genre_mood': {
+                'quality_threshold': 0.5,     # Higher quality for genre/mood focus
+                'genre_weight': 0.6,          # High genre matching weight
+                'mood_weight': 0.7,           # High mood matching weight
+                'audio_feature_weight': 0.8,  # Strong audio feature focus
+                'max_per_genre': 8,           # Allow more per genre
+                'candidate_focus': 'style_precision'
+            },
+            'artist_similarity': {
+                'quality_threshold': 0.45,    # Moderate quality
+                'genre_weight': 0.4,          # Moderate genre matching
+                'mood_weight': 0.3,           # Less mood focus
+                'audio_feature_weight': 0.5,  # Moderate audio features
+                'max_per_genre': 5,           # Balanced genre diversity
+                'candidate_focus': 'similar_style'
+            },
+            'contextual': {
+                'quality_threshold': 0.6,     # High quality for functional use
+                'genre_weight': 0.3,          # Less genre restriction
+                'mood_weight': 0.8,           # Very high mood importance
+                'audio_feature_weight': 0.9,  # Critical audio features (BPM, energy)
+                'max_per_genre': 6,           # Moderate genre diversity
+                'candidate_focus': 'functional_audio'
+            },
+            'discovery': {
+                'quality_threshold': 0.3,     # Lower for discovery
+                'genre_weight': 0.5,          # Moderate genre matching
+                'mood_weight': 0.4,           # Moderate mood matching
+                'audio_feature_weight': 0.4,  # Moderate audio features
+                'max_per_genre': 3,           # High genre diversity
+                'candidate_focus': 'genre_exploration'
+            },
+            'hybrid': {
+                'quality_threshold': 0.4,     # Balanced quality
+                'genre_weight': 0.5,          # Balanced genre matching
+                'mood_weight': 0.6,           # Good mood matching
+                'audio_feature_weight': 0.6,  # Good audio feature focus
+                'max_per_genre': 4,           # Balanced diversity
+                'candidate_focus': 'balanced_style'
+            }
+        }
+        
+        self.logger.info("Simplified GenreMoodAgent initialized with intent-aware parameters")
+    
+    def _adapt_to_intent(self, intent: str) -> None:
+        """Adapt agent parameters based on detected intent."""
+        if intent in self.intent_parameters:
+            params = self.intent_parameters[intent]
+            
+            self.quality_threshold = params['quality_threshold']
+            # Store other parameters for use in processing
+            self.current_genre_weight = params['genre_weight']
+            self.current_mood_weight = params['mood_weight']
+            self.current_audio_feature_weight = params['audio_feature_weight']
+            self.current_max_per_genre = params['max_per_genre']
+            self.current_candidate_focus = params['candidate_focus']
+            
+            self.logger.info(
+                f"Adapted genre/mood parameters for intent: {intent}",
+                quality_threshold=self.quality_threshold,
+                genre_weight=self.current_genre_weight,
+                mood_weight=self.current_mood_weight,
+                audio_feature_weight=self.current_audio_feature_weight
+            )
+        else:
+            # Set defaults
+            self.current_genre_weight = 0.5
+            self.current_mood_weight = 0.5
+            self.current_audio_feature_weight = 0.5
+            self.current_max_per_genre = 4
+            self.current_candidate_focus = 'balanced_style'
+            self.logger.warning(f"Unknown intent: {intent}, using default parameters")
     
     async def process(self, state: MusicRecommenderState) -> MusicRecommenderState:
         """
@@ -98,12 +171,31 @@ class GenreMoodAgent(BaseAgent):
             entities = state.entities or {}
             intent_analysis = state.intent_analysis or {}
             
+            # 🔧 Get intent and adapt parameters accordingly
+            query_understanding = state.query_understanding
+            detected_intent = 'genre_mood'  # Default for genre/mood agent
+            
+            if query_understanding and hasattr(query_understanding, 'intent'):
+                # QueryUnderstanding is an object, get intent value
+                intent_from_query = query_understanding.intent.value if hasattr(query_understanding.intent, 'value') else str(query_understanding.intent)
+                detected_intent = intent_from_query
+                
+                # Add intent to intent_analysis if missing
+                if not intent_analysis.get('intent') and intent_from_query:
+                    intent_analysis['intent'] = intent_from_query
+            else:
+                self.logger.warning("No query_understanding or intent found in state, using default genre/mood parameters")
+            
+            # 🚀 PHASE 2: Adapt agent parameters based on detected intent
+            self._adapt_to_intent(detected_intent)
+            
             # Phase 1: Generate candidates using shared generator
             candidates = await self.candidate_generator.generate_candidate_pool(
                 entities=entities,
                 intent_analysis=intent_analysis,
                 agent_type="genre_mood",
-                target_candidates=self.target_candidates
+                target_candidates=self.target_candidates,
+                detected_intent=detected_intent
             )
             
             self.logger.debug(f"Generated {len(candidates)} candidates")
@@ -306,7 +398,19 @@ class GenreMoodAgent(BaseAgent):
                     confidence=candidate.get('combined_score', 0.5),
                     explanation=reasoning,
                     quality_score=candidate.get('quality_score', 0.0),
-                    advocate_source_agent='genre_mood_agent'
+                    advocate_source_agent='genre_mood_agent',
+                    raw_source_data={
+                        'playcount': candidate.get('playcount', 0),
+                        'listeners': candidate.get('listeners', 0),
+                        'popularity': candidate.get('popularity', 0),
+                        'tags': candidate.get('tags', []),
+                        'quality_score': candidate.get('quality_score', 0.0)
+                    },
+                    additional_scores={
+                        'combined_score': candidate.get('combined_score', 0.5),
+                        'quality_score': candidate.get('quality_score', 0.0),
+                        'genre_mood_score': candidate.get('genre_mood_score', 0.0)
+                    }
                 )
                 
                 recommendations.append(recommendation)

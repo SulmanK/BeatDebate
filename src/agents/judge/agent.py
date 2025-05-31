@@ -18,6 +18,8 @@ from ...services.metadata_service import MetadataService
 from ..base_agent import BaseAgent
 from ..components import QualityScorer
 from ..components.llm_utils import LLMUtils
+from .ranking_logic import RankingLogic
+from ..components.query_analysis_utils import QueryAnalysisUtils
 
 logger = structlog.get_logger(__name__)
 
@@ -68,12 +70,15 @@ class JudgeAgent(BaseAgent):
         self.quality_scorer = QualityScorer()
         
         # Configuration
-        self.final_recommendations = 20
+        self.final_recommendations = 25
         self.diversity_targets = {
             'max_per_artist': 2,
             'min_genres': 3,
             'source_distribution': {'genre_mood_agent': 0.4, 'discovery_agent': 0.4, 'planner_agent': 0.2}
         }
+        
+        # Initialize shared components
+        self.ranking_logic = RankingLogic()
         
         self.logger.info("Simplified JudgeAgent initialized with dependency injection")
     
@@ -107,7 +112,7 @@ class JudgeAgent(BaseAgent):
             ranked_candidates = await self._rank_candidates(scored_candidates, state)
             
             # Phase 3: Select final recommendations with diversity
-            final_selections = self._select_with_diversity(ranked_candidates)
+            final_selections = self._select_with_diversity(ranked_candidates, state)
             
             # Phase 4: Generate enhanced explanations
             final_recommendations = await self._generate_explanations(final_selections, state)
@@ -207,13 +212,36 @@ class JudgeAgent(BaseAgent):
         intent_analysis = state.intent_analysis or {}
         query_understanding = state.query_understanding
         
+        # 🔧 FIX: Get intent from state and detect hybrid sub-types
+        intent = 'balanced'  # default
+        if state and state.query_understanding and hasattr(state.query_understanding, 'intent'):
+            # Get intent from QueryUnderstanding object
+            intent_value = state.query_understanding.intent
+            if hasattr(intent_value, 'value'):
+                intent = intent_value.value
+            else:
+                intent = str(intent_value)
+            self.logger.debug(f"🔧 Intent from query_understanding: {intent}")
+            
+            # 🔧 NEW: Detect hybrid sub-types for dynamic scoring
+            if intent == 'hybrid':
+                hybrid_subtype = self._detect_hybrid_subtype(state)
+                intent = hybrid_subtype
+                self.logger.info(f"🔧 Using hybrid sub-type for scoring: {intent}")
+        
+        elif state and state.intent_analysis and 'intent' in state.intent_analysis:
+            intent = state.intent_analysis['intent']
+            self.logger.debug(f"🔧 Intent from intent_analysis: {intent}")
+        else:
+            self.logger.warning("🔧 No intent found, using default: balanced")
+        
         for candidate in candidates:
             try:
                 # Calculate multiple scoring dimensions
                 scores = {
                     'quality_score': await self._calculate_quality_score(candidate, entities, intent_analysis),
                     'contextual_relevance': self._calculate_contextual_relevance(candidate, entities, intent_analysis),
-                    'intent_alignment': self._calculate_intent_alignment(candidate, intent_analysis),
+                    'intent_alignment': self._calculate_intent_alignment(candidate, intent_analysis, entities, intent),
                     'source_priority': self._calculate_source_priority(candidate),
                     'diversity_value': self._calculate_diversity_value(candidate, entities)
                 }
@@ -298,13 +326,19 @@ class JudgeAgent(BaseAgent):
     def _calculate_intent_alignment(
         self,
         candidate: TrackRecommendation,
-        intent_analysis: Dict[str, Any]
+        intent_analysis: Dict[str, Any],
+        entities: Dict[str, Any],
+        intent: str
     ) -> float:
         """Calculate alignment with user intent."""
-        primary_intent = intent_analysis.get('primary_intent', 'discovery')
+        # 🔧 DEBUG: Log intent detection for troubleshooting
+        if candidate.artist == 'Mk.gee':
+            self.logger.info(f"🔍 DEBUG Judge: Candidate '{candidate.title}' by {candidate.artist}")
+            self.logger.info(f"🔍 DEBUG Judge: Primary intent detected: '{intent}'")
+            self.logger.info(f"🔍 DEBUG Judge: Intent analysis keys: {list(intent_analysis.keys())}")
         
         # Intent-specific scoring
-        if primary_intent == 'discovery':
+        if intent == 'discovery':
             # Favor tracks with novelty indicators
             if candidate.source == 'discovery_agent':
                 return 0.8
@@ -313,19 +347,41 @@ class JudgeAgent(BaseAgent):
             else:
                 return 0.5
         
-        elif primary_intent == 'genre_mood':
+        elif intent == 'genre_mood':
             # Favor tracks from genre/mood agent
             if candidate.source == 'genre_mood_agent':
                 return 0.8
             else:
                 return 0.6
         
-        elif primary_intent == 'similarity':
-            # Favor tracks with similarity indicators
-            if hasattr(candidate, 'explanation') and candidate.explanation and 'similar' in candidate.explanation.lower():
-                return 0.8
+        elif intent in ['similarity', 'artist_similarity']:
+            # ✅ FIXED! Handle both similarity and artist_similarity intents
+            # For artist similarity queries, prioritize tracks from the target artist
+            if intent == 'artist_similarity':
+                # Get target artists from entities (not intent_analysis)
+                target_artists = self._extract_target_artists_from_entities(entities)
+                
+                # 🔧 DEBUG: Log target artist extraction for troubleshooting
+                if candidate.artist == 'Mk.gee':
+                    self.logger.info(f"🔍 DEBUG Judge: Target artists extracted: {target_artists}")
+                    self.logger.info(f"🔍 DEBUG Judge: Candidate artist '{candidate.artist}' in target_artists: {candidate.artist in target_artists}")
+                
+                if target_artists and candidate.artist in target_artists:
+                    if candidate.artist == 'Mk.gee':
+                        self.logger.info(f"🎯 DEBUG Judge: Giving 0.95 intent alignment to Mk.gee track!")
+                    return 0.95  # Very high score for target artist tracks
+                elif (hasattr(candidate, 'explanation') and candidate.explanation 
+                      and 'similar' in candidate.explanation.lower()):
+                    return 0.8   # High score for similar tracks
+                else:
+                    return 0.6   # Medium score for other tracks
             else:
-                return 0.6
+                # General similarity
+                if (hasattr(candidate, 'explanation') and candidate.explanation 
+                    and 'similar' in candidate.explanation.lower()):
+                    return 0.8
+                else:
+                    return 0.6
         
         return 0.5  # Default alignment
     
@@ -367,20 +423,44 @@ class JudgeAgent(BaseAgent):
         scored_candidates: List[Tuple[TrackRecommendation, Dict[str, float]]],
         state: MusicRecommenderState
     ) -> List[Tuple[TrackRecommendation, Dict[str, float]]]:
-        """Rank candidates by combined score."""
-        # Sort by combined score
-        ranked = sorted(
-            scored_candidates,
-            key=lambda x: x[1]['combined_score'],
-            reverse=True
+        """Rank candidates using intent-aware scoring."""
+        # Get user intent for scoring weights
+        intent = state.query_understanding.intent.value if state.query_understanding else 'balanced'
+        
+        # 🔧 NEW: Detect hybrid sub-types for dynamic scoring
+        if intent == 'hybrid':
+            hybrid_subtype = self._detect_hybrid_subtype(state)
+            intent = hybrid_subtype
+            self.logger.info(f"🔧 Using hybrid sub-type for ranking: {intent}")
+        
+        # 🔧 Use RankingLogic with intent-specific parameters
+        ranking_logic = RankingLogic()
+        
+        # Get intent-specific scoring weights
+        scoring_weights = ranking_logic.get_intent_weights(intent)
+        self.logger.info(f"🔧 Using scoring weights for intent '{intent}': {scoring_weights}")
+        
+        # Get intent-specific novelty threshold
+        novelty_threshold = ranking_logic.get_novelty_threshold(intent)
+        self.logger.info(f"🔧 Using novelty threshold for intent '{intent}': {novelty_threshold}")
+        
+        # Rank candidates using intent-aware logic
+        ranked_candidates = ranking_logic.rank_recommendations(
+            candidates=scored_candidates, 
+            intent=intent,
+            entities=state.entities,
+            intent_analysis=state.intent_analysis,
+            novelty_threshold=novelty_threshold,
+            scoring_weights=scoring_weights
         )
         
-        self.logger.debug(f"Ranked {len(ranked)} candidates")
-        return ranked
+        self.logger.debug(f"Ranked {len(ranked_candidates)} candidates using intent: {intent}")
+        return ranked_candidates
     
     def _select_with_diversity(
         self,
-        ranked_candidates: List[Tuple[TrackRecommendation, Dict[str, float]]]
+        ranked_candidates: List[Tuple[TrackRecommendation, Dict[str, float]]],
+        state: MusicRecommenderState = None
     ) -> List[TrackRecommendation]:
         """Select final recommendations ensuring diversity."""
         selected = []
@@ -388,16 +468,36 @@ class JudgeAgent(BaseAgent):
         genre_counts = {}
         source_counts = {}
         
+        # 🔧 FIX: Get intent-specific diversity limits instead of hardcoded ones
+        intent = 'balanced'  # default
+        if state and state.query_understanding and hasattr(state.query_understanding, 'intent'):
+            # Get intent from QueryUnderstanding object
+            intent_value = state.query_understanding.intent
+            if hasattr(intent_value, 'value'):
+                intent = intent_value.value
+            else:
+                intent = str(intent_value)
+            self.logger.debug(f"🔧 Intent from query_understanding: {intent}")
+        elif state and state.intent_analysis and 'intent' in state.intent_analysis:
+            intent = state.intent_analysis['intent']
+            self.logger.debug(f"🔧 Intent from intent_analysis: {intent}")
+        
+        # Use intent-specific diversity limits
+        diversity_limits = self.ranking_logic.get_diversity_limits(intent)
+        max_per_artist = diversity_limits.get('max_per_artist', 2)
+        
+        self.logger.debug(f"🔧 DEBUG: Intent: {intent}, max tracks per artist: {max_per_artist}")
+        
         self.logger.debug(f"Starting diversity selection with {len(ranked_candidates)} candidates")
         
         for i, (candidate, scores) in enumerate(ranked_candidates):
             self.logger.debug(
                 f"Evaluating candidate {i+1}: {candidate.title} by {candidate.artist}, "
-                f"source={candidate.source}, score={scores.get('combined_score', 0):.3f}"
+                f"source={candidate.source}, score={scores.get('final_score', 0):.3f}"
             )
             
-            # Check artist diversity
-            if artist_counts.get(candidate.artist, 0) >= self.diversity_targets['max_per_artist']:
+            # Check artist diversity using intent-specific limits
+            if artist_counts.get(candidate.artist, 0) >= max_per_artist:
                 self.logger.debug(f"Skipping {candidate.title}: too many tracks from {candidate.artist}")
                 continue
             
@@ -428,6 +528,10 @@ class JudgeAgent(BaseAgent):
             # Stop when we have enough
             if len(selected) >= self.final_recommendations:
                 break
+        
+        self.logger.info(
+            f"🔧 DEBUG: Diversity filtering: {len(ranked_candidates)} -> {len(selected)} candidates"
+        )
         
         self.logger.info(
             f"Selected {len(selected)} recommendations with diversity",
@@ -524,6 +628,17 @@ class JudgeAgent(BaseAgent):
         
         return list(set(moods))  # Remove duplicates
     
+    def _extract_target_artists_from_entities(self, entities: Dict[str, Any]) -> List[str]:
+        """Extract target artists from entities for artist similarity queries."""
+        musical_entities = entities.get('musical_entities', {})
+        artists = musical_entities.get('artists', {})
+        
+        target_artists = []
+        target_artists.extend(artists.get('primary', []))
+        target_artists.extend(artists.get('similar_to', []))
+        
+        return list(set(target_artists))  # Remove duplicates
+    
     async def evaluate_and_select(self, state: MusicRecommenderState) -> MusicRecommenderState:
         """
         Evaluate and select final recommendations (alias for process method).
@@ -537,3 +652,73 @@ class JudgeAgent(BaseAgent):
             Updated state with final ranked recommendations
         """
         return await self.process(state) 
+    
+    def _detect_hybrid_subtype(self, state: MusicRecommenderState) -> str:
+        """
+        Detect hybrid sub-type from state information.
+        
+        Args:
+            state: Current recommendation state
+            
+        Returns:
+            Hybrid sub-type or original intent if not hybrid
+        """
+        try:
+            # First check if we stored the sub-type in reasoning
+            if state.query_understanding and hasattr(state.query_understanding, 'reasoning'):
+                reasoning = state.query_understanding.reasoning
+                if 'Hybrid sub-type:' in reasoning:
+                    subtype = reasoning.split('Hybrid sub-type:')[1].strip()
+                    self.logger.info(f"🔧 Found stored hybrid sub-type: {subtype}")
+                    return f"hybrid_{subtype}"
+            
+            # 🔧 BETTER DETECTION: Analyze the query directly for similarity-primary patterns
+            if state.query_understanding and hasattr(state.query_understanding, 'original_query'):
+                query = state.query_understanding.original_query.lower()
+                
+                # Similarity-primary indicators: artist + "like" + modifier
+                similarity_phrases = ['like', 'similar to', 'sounds like', 'reminds me of']
+                has_similarity = any(phrase in query for phrase in similarity_phrases)
+                
+                # Style modifiers that indicate this is similarity + genre hybrid
+                style_modifiers = ['but', 'with', 'and', 'plus', 'jazzy', 'chill', 'upbeat', 'dark', 'electronic']
+                has_style_modifier = any(modifier in query for modifier in style_modifiers)
+                
+                # Check for artist names in entities
+                has_artists = False
+                if state.entities and state.entities.get('musical_entities', {}).get('artists', {}).get('primary'):
+                    has_artists = True
+                
+                # 🔧 KEY FIX: "Music like [Artist] but [style]" = similarity_primary 
+                if has_similarity and has_artists and has_style_modifier:
+                    self.logger.info(f"🔧 DETECTED SIMILARITY-PRIMARY: Query has artist + similarity phrase + style modifier")
+                    return 'hybrid_similarity_primary'
+                
+                # Discovery-primary indicators
+                discovery_terms = ['underground', 'new', 'hidden', 'unknown', 'discover', 'find']
+                has_discovery = any(term in query for term in discovery_terms)
+                
+                if has_discovery:
+                    self.logger.info(f"🔧 DETECTED DISCOVERY-PRIMARY: Query has discovery indicators")
+                    return 'hybrid_discovery_primary'
+                
+                # Genre-primary fallback
+                self.logger.info(f"🔧 DETECTED GENRE-PRIMARY: Default for style-focused hybrid")
+                return 'hybrid_genre_primary'
+            
+            # Fallback: detect from query and entities using query utils
+            if state.query_understanding and state.entities:
+                query_utils = QueryAnalysisUtils()
+                
+                subtype = query_utils.detect_hybrid_subtype(
+                    state.query_understanding.original_query,
+                    state.entities
+                )
+                self.logger.info(f"🔧 Detected hybrid sub-type via query utils: {subtype}")
+                return f"hybrid_{subtype}"
+                
+        except Exception as e:
+            self.logger.warning(f"Failed to detect hybrid sub-type: {e}")
+        
+        # Default fallback
+        return 'hybrid' 

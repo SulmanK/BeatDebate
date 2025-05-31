@@ -192,15 +192,27 @@ class SmartContextManager:
         
         # Use LLM understanding if available
         if llm_understanding:
-            return {
-                "primary_intent": llm_understanding.get("intent", {}).get("value", "unknown"),
-                "artists": llm_understanding.get("artists", []),
-                "genres": llm_understanding.get("genres", []),
-                "moods": llm_understanding.get("moods", []),
-                "activities": llm_understanding.get("activities", []),
-                "confidence": llm_understanding.get("confidence", 0.5),
-                "source": "llm_understanding"
-            }
+            # Handle both dict and QueryUnderstanding object
+            if hasattr(llm_understanding, 'intent'):  # QueryUnderstanding object
+                return {
+                    "primary_intent": llm_understanding.intent.value if hasattr(llm_understanding.intent, 'value') else str(llm_understanding.intent),
+                    "artists": llm_understanding.artists,
+                    "genres": llm_understanding.genres,
+                    "moods": llm_understanding.moods,
+                    "activities": llm_understanding.activities,
+                    "confidence": llm_understanding.confidence,
+                    "source": "llm_understanding"
+                }
+            else:  # Dictionary format
+                return {
+                    "primary_intent": llm_understanding.get("intent", {}).get("value", "unknown"),
+                    "artists": llm_understanding.get("artists", []),
+                    "genres": llm_understanding.get("genres", []),
+                    "moods": llm_understanding.get("moods", []),
+                    "activities": llm_understanding.get("activities", []),
+                    "confidence": llm_understanding.get("confidence", 0.5),
+                    "source": "llm_understanding"
+                }
         
         # Fallback to pattern matching
         detected_intent = None
@@ -553,17 +565,38 @@ class SmartContextManager:
         
         # Create entities dict from LLM understanding or query analysis
         if llm_understanding:
-            entities = {
-                "musical_entities": {
-                    "artists": {"primary": llm_understanding.get("artists", [])},
-                    "genres": {"primary": llm_understanding.get("genres", [])},
-                },
-                "contextual_entities": {
-                    "moods": {"energy": llm_understanding.get("moods", [])},
-                    "activities": {"physical": llm_understanding.get("activities", [])},
-                },
-                "llm_understanding": llm_understanding
-            }
+            # Handle both dict and QueryUnderstanding object
+            if hasattr(llm_understanding, 'artists'):  # QueryUnderstanding object
+                entities = {
+                    "musical_entities": {
+                        "artists": {"primary": llm_understanding.artists},
+                        "genres": {"primary": llm_understanding.genres},
+                    },
+                    "contextual_entities": {
+                        "moods": {"energy": llm_understanding.moods},
+                        "activities": {"physical": llm_understanding.activities},
+                    },
+                    "llm_understanding": {
+                        "intent": llm_understanding.intent.value if hasattr(llm_understanding.intent, 'value') else str(llm_understanding.intent),
+                        "confidence": llm_understanding.confidence,
+                        "artists": llm_understanding.artists,
+                        "genres": llm_understanding.genres,
+                        "moods": llm_understanding.moods,
+                        "activities": llm_understanding.activities
+                    }
+                }
+            else:  # Dictionary format
+                entities = {
+                    "musical_entities": {
+                        "artists": {"primary": llm_understanding.get("artists", [])},
+                        "genres": {"primary": llm_understanding.get("genres", [])},
+                    },
+                    "contextual_entities": {
+                        "moods": {"energy": llm_understanding.get("moods", [])},
+                        "activities": {"physical": llm_understanding.get("activities", [])},
+                    },
+                    "llm_understanding": llm_understanding
+                }
         else:
             entities = {"query_analysis": await self._analyze_query_intent(query)}
         

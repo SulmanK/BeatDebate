@@ -31,20 +31,28 @@ class QueryAnalysisUtils:
         # Intent patterns
         self.intent_patterns = {
             'discovery': [
-                'discover', 'find new', 'explore', 'unknown', 'hidden gems',
-                'underground', 'obscure', 'rare', 'unheard', 'fresh'
+                'find', 'discover', 'explore', 'recommend', 'suggest',
+                'new', 'different', 'unknown', 'underground', 'hidden',
+                'fresh', 'novel', 'rare', 'obscure', 'gems'
             ],
             'similarity': [
-                'like', 'similar to', 'sounds like', 'reminds me of',
-                'in the style of', 'comparable to', 'along the lines of'
+                'like', 'similar', 'sounds like', 'reminds me of',
+                'style of', 'same as', 'comparable to'
             ],
             'mood_based': [
                 'feel', 'mood', 'vibe', 'atmosphere', 'energy',
                 'upbeat', 'calm', 'relaxing', 'energetic', 'chill'
             ],
             'activity_based': [
-                'work', 'study', 'exercise', 'party', 'relax',
-                'driving', 'cooking', 'sleeping', 'focus'
+                'work', 'study', 'studying', 'exercise', 'party', 'relax',
+                'driving', 'cooking', 'sleeping', 'focus', 'workout',
+                'concentration', 'background', 'ambient', 'for work',
+                'for study', 'for studying', 'for exercise', 'for driving',
+                'for cooking', 'for relaxing', 'for sleeping', 'for focus',
+                'while working', 'while studying', 'while driving',
+                'while cooking', 'while exercising', 'gym music',
+                'office music', 'study music', 'workout music',
+                'background music', 'productivity', 'homework'
             ],
             'genre_specific': [
                 'rock', 'pop', 'electronic', 'jazz', 'classical',
@@ -127,13 +135,32 @@ class QueryAnalysisUtils:
                     'matched_patterns': matched_patterns
                 }
         
-        # Determine primary intent
+        # 🔧 FIX: Detect hybrid intents for queries with multiple strong intent signals
+        primary_intent = 'discovery'  # Default
+        primary_confidence = 0.3
+        
         if intent_scores:
-            primary_intent = max(intent_scores.keys(), key=lambda x: intent_scores[x]['score'])
-            primary_confidence = intent_scores[primary_intent]['confidence']
-        else:
-            primary_intent = 'discovery'  # Default intent
-            primary_confidence = 0.3
+            # Check for hybrid intent patterns
+            has_discovery = 'discovery' in intent_scores
+            has_genre = 'genre_specific' in intent_scores  
+            has_similarity = 'similarity' in intent_scores
+            has_mood = 'mood_based' in intent_scores
+            
+            # Hybrid detection rules based on design document
+            if has_discovery and has_genre:
+                # "underground indie rock" = discovery + genre -> HYBRID
+                primary_intent = 'hybrid'
+                primary_confidence = 0.8
+                self.logger.info(f"🔧 HYBRID DETECTED: discovery + genre in query: '{query}'")
+            elif has_similarity and (has_mood or has_genre):
+                # "chill songs like Bon Iver" = similarity + mood -> HYBRID
+                primary_intent = 'hybrid'
+                primary_confidence = 0.8
+                self.logger.info(f"🔧 HYBRID DETECTED: similarity + mood/genre in query: '{query}'")
+            else:
+                # Single intent - pick the highest scoring
+                primary_intent = max(intent_scores.keys(), key=lambda x: intent_scores[x]['score'])
+                primary_confidence = intent_scores[primary_intent]['confidence']
         
         # Determine secondary intents
         secondary_intents = [
@@ -645,3 +672,139 @@ class QueryAnalysisUtils:
         )
         
         return analysis 
+    
+    def detect_hybrid_subtype(self, query: str, entities: Dict[str, Any] = None) -> str:
+        """
+        Detect the primary intent within hybrid queries.
+        
+        Args:
+            query: User query text
+            entities: Extracted entities (optional)
+            
+        Returns:
+            Hybrid sub-type: discovery_primary, similarity_primary, or genre_primary
+        """
+        query_lower = query.lower()
+        
+        # Discovery indicators - words that suggest underground/novelty focus
+        discovery_terms = [
+            'underground', 'new', 'hidden', 'unknown', 'discover', 'find',
+            'gems', 'obscure', 'rare', 'experimental', 'unexplored',
+            'fresh', 'latest', 'emerging', 'undiscovered'
+        ]
+        
+        # Artist similarity indicators - phrases that suggest artist-based similarity
+        similarity_phrases = [
+            'like', 'similar', 'sounds like', 'reminds me of', 'in the style of',
+            'comparable to', 'along the lines of', 'inspired by'
+        ]
+        
+        # Count discovery indicators
+        discovery_score = sum(1 for term in discovery_terms if term in query_lower)
+        
+        # 🔧 ROBUST ARTIST SIMILARITY DETECTION
+        has_artist_similarity = False
+        artist_names = []
+        
+        # Method 1: Check entities first
+        if entities and entities.get('musical_entities', {}).get('artists', {}).get('primary'):
+            artist_names = entities['musical_entities']['artists']['primary']
+            has_similarity_phrase = any(phrase in query_lower for phrase in similarity_phrases)
+            if has_similarity_phrase:
+                has_artist_similarity = True
+                self.logger.info(f"🔧 ARTIST SIMILARITY DETECTED: Found artists {artist_names} with similarity phrase in query")
+        
+        # Method 2: Fallback - look for direct artist names with similarity phrases
+        if not has_artist_similarity:
+            for phrase in similarity_phrases:
+                if phrase in query_lower:
+                    # Look for likely artist names (capitalized words) in the query
+                    import re
+                    # Find all capitalized word sequences (potential artist names)
+                    potential_artists = re.findall(r'\b[A-Z][a-z]+(?:\s+[A-Z][a-z]+)*\b', query)
+                    if potential_artists:
+                        has_artist_similarity = True
+                        artist_names = potential_artists
+                        self.logger.info(f"🔧 FALLBACK ARTIST SIMILARITY: Found '{potential_artists}' with '{phrase}' in query")
+                        break
+        
+        # Check for genre/mood emphasis beyond just artist similarity
+        has_genre_mood_focus = self._has_genre_mood_emphasis(query_lower)
+        
+        # 🔧 PRIORITY LOGIC: Determine primary intent based on strength of indicators
+        self.logger.info(f"🔧 HYBRID DETECTION: discovery_score={discovery_score}, has_artist_similarity={has_artist_similarity}, artist_names={artist_names}, has_genre_mood_focus={has_genre_mood_focus}")
+        
+        # Discovery-primary: Strong discovery indicators override everything
+        if discovery_score >= 2:
+            self.logger.info(f"🔧 DISCOVERY-PRIMARY: {discovery_score} discovery terms found")
+            return 'discovery_primary'
+        
+        # Similarity-primary: Artist + similarity phrase + modifier (like "but jazzy")
+        if has_artist_similarity and artist_names:
+            # Check for style modifiers after artist mention (like "but jazzy", "with electronic elements")
+            style_modifiers = ['but', 'with', 'and', 'plus', 'mixed with', 'combined with', 'featuring']
+            has_style_modifier = any(modifier in query_lower for modifier in style_modifiers)
+            
+            if has_style_modifier or has_genre_mood_focus:
+                self.logger.info(f"🔧 SIMILARITY-PRIMARY: Artist '{artist_names}' with style modifier or genre focus")
+                return 'similarity_primary'
+        
+        # Genre-primary: Strong genre/mood focus without clear artist similarity
+        if has_genre_mood_focus and not has_artist_similarity:
+            self.logger.info(f"🔧 GENRE-PRIMARY: Strong genre/mood focus without artist similarity")
+            return 'genre_primary'
+        
+        # Discovery-primary: Even single discovery terms can indicate this intent
+        if discovery_score >= 1:
+            self.logger.info(f"🔧 DISCOVERY-PRIMARY: {discovery_score} discovery term found")
+            return 'discovery_primary'
+        
+        # Default fallback based on strongest signal
+        if has_artist_similarity:
+            self.logger.info(f"🔧 SIMILARITY-PRIMARY: Default for artist similarity queries")
+            return 'similarity_primary'
+        elif has_genre_mood_focus:
+            self.logger.info(f"🔧 GENRE-PRIMARY: Default for genre/mood queries")
+            return 'genre_primary'
+        else:
+            self.logger.info(f"🔧 GENRE-PRIMARY: Default fallback")
+            return 'genre_primary'
+    
+    def _count_artist_mentions(self, query_lower: str) -> int:
+        """Count explicit artist mentions in query text."""
+        # Simple heuristic - count capitalized words that might be artist names
+        words = query_lower.split()
+        artist_indicators = ['by', 'from', 'artist']
+        count = 0
+        
+        for i, word in enumerate(words):
+            if word in artist_indicators and i + 1 < len(words):
+                count += 1
+        
+        return count
+    
+    def _has_genre_mood_emphasis(self, query_lower: str) -> bool:
+        """Check if query has strong genre or mood emphasis."""
+        # Genre indicators
+        genre_terms = [
+            'jazz', 'jazzy', 'rock', 'electronic', 'indie', 'pop', 'hip-hop', 'rap',
+            'ambient', 'classical', 'folk', 'country', 'metal', 'punk', 'reggae',
+            'blues', 'soul', 'funk', 'disco', 'house', 'techno', 'dubstep'
+        ]
+        
+        # Mood indicators  
+        mood_terms = [
+            'chill', 'relaxing', 'upbeat', 'energetic', 'sad', 'happy', 'dark',
+            'bright', 'mellow', 'aggressive', 'calm', 'intense', 'smooth', 'rough'
+        ]
+        
+        # Style modifiers that indicate genre/mood focus
+        style_terms = [
+            'vibes', 'style', 'sound', 'feeling', 'mood', 'atmosphere', 'energy'
+        ]
+        
+        all_terms = genre_terms + mood_terms + style_terms
+        found_terms = [term for term in all_terms if term in query_lower]
+        
+        # Strong emphasis if multiple terms or specific style modifiers
+        return len(found_terms) >= 2 or any(term in style_terms for term in found_terms) 

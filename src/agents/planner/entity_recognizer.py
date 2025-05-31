@@ -55,28 +55,28 @@ class EntityRecognizer:
             Extracted entities with confidence scores
         """
         try:
-            # Phase 1: Pattern-based extraction using shared utilities
-            pattern_entities = self.entity_utils.validate_and_enhance_entities({}, query)
-            
-            # Phase 2: LLM-based extraction for complex queries
-            query_complexity = self.query_utils.analyze_query_complexity(query)
-            
-            if query_complexity['complexity_level'] in ['complex', 'very_complex']:
-                self.logger.debug("Using LLM extraction for complex query")
+            # Always try LLM-based extraction first (most accurate)
+            self.logger.debug("Using LLM extraction for entity extraction")
+            try:
                 llm_entities = await self._llm_entity_extraction(query, conversation_context)
-                # Merge pattern and LLM results
-                final_entities = self._merge_entity_results(pattern_entities, llm_entities)
-            else:
-                self.logger.debug("Using pattern-based extraction for simple query")
+                final_entities = llm_entities
+                
+                # Add extraction metadata
+                final_entities['extraction_method'] = 'llm_primary'
+                
+            except Exception as llm_error:
+                self.logger.warning("LLM extraction failed, falling back to pattern-based", error=str(llm_error))
+                # Fallback to pattern-based extraction
+                pattern_entities = self.entity_utils.validate_and_enhance_entities({}, query)
                 final_entities = pattern_entities
+                final_entities['extraction_method'] = 'pattern_fallback'
             
-            # Add extraction metadata
-            final_entities['extraction_method'] = 'simplified_planner'
+            query_complexity = self.query_utils.analyze_query_complexity(query)
             final_entities['complexity_level'] = query_complexity['complexity_level']
             
             self.logger.debug(
                 "Entity extraction completed",
-                method='simplified_planner',
+                method=final_entities['extraction_method'],
                 complexity=query_complexity['complexity_level'],
                 total_entities=self._count_entities(final_entities)
             )

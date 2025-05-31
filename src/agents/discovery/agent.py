@@ -18,7 +18,6 @@ from ...services.metadata_service import MetadataService
 from ..base_agent import BaseAgent
 from ..components.unified_candidate_generator import UnifiedCandidateGenerator
 from ..components import QualityScorer
-from ..components.llm_utils import LLMUtils
 
 logger = structlog.get_logger(__name__)
 
@@ -70,17 +69,81 @@ class DiscoveryAgent(BaseAgent):
         self.candidate_generator = UnifiedCandidateGenerator(api_service)
         self.quality_scorer = QualityScorer()
         
-        # Configuration
+        # Base configuration - will be adapted based on intent
         self.target_candidates = 100
         self.final_recommendations = 20
-        self.quality_threshold = 0.3   # Lowered from 0.5 for more permissive filtering
-        self.novelty_threshold = 0.4   # Lowered from 0.6 for more permissive filtering
+        self.quality_threshold = 0.3   # Base threshold
+        self.novelty_threshold = 0.4   # Base threshold
         
-        # Discovery parameters
+        # Discovery parameters - will be adapted based on intent
         self.underground_bias = 0.7
         self.similarity_depth = 2  # Multi-hop depth
         
-        self.logger.info("Simplified DiscoveryAgent initialized with dependency injection")
+        # Intent-specific parameter configurations from design document
+        self.intent_parameters = {
+            'artist_similarity': {
+                'novelty_threshold': 0.15,    # Very relaxed for similar artists
+                'quality_threshold': 0.4,     # Higher quality focus
+                'underground_bias': 0.3,      # Less underground bias
+                'similarity_depth': 3,        # Deeper similarity exploration
+                'max_per_artist': 3,          # Allow more tracks per similar artist
+                'candidate_focus': 'similar_artists'
+            },
+            'discovery': {
+                'novelty_threshold': 0.6,     # Strict novelty requirement
+                'quality_threshold': 0.25,    # Lower quality to find gems
+                'underground_bias': 0.8,      # High underground preference
+                'similarity_depth': 1,        # Less similarity depth
+                'max_per_artist': 1,          # Diversity over repetition
+                'candidate_focus': 'underground_gems'
+            },
+            'genre_mood': {
+                'novelty_threshold': 0.3,     # Moderate novelty
+                'quality_threshold': 0.35,    # Balanced quality
+                'underground_bias': 0.5,      # Balanced underground bias
+                'similarity_depth': 2,        # Standard depth
+                'max_per_artist': 2,          # Moderate diversity
+                'candidate_focus': 'style_match'
+            },
+            'contextual': {
+                'novelty_threshold': 0.2,     # Relaxed for functional music
+                'quality_threshold': 0.45,    # Higher quality for context
+                'underground_bias': 0.4,      # Less underground for reliability
+                'similarity_depth': 1,        # Simple matching
+                'max_per_artist': 2,          # Moderate diversity
+                'candidate_focus': 'functional_fit'
+            },
+            'hybrid': {
+                'novelty_threshold': 0.25,    # Moderate novelty
+                'quality_threshold': 0.35,    # Balanced approach
+                'underground_bias': 0.6,      # Moderate underground bias
+                'similarity_depth': 2,        # Standard depth
+                'max_per_artist': 2,          # Balanced diversity
+                'candidate_focus': 'balanced'
+            }
+        }
+        
+        self.logger.info("Simplified DiscoveryAgent initialized with intent-aware parameters")
+    
+    def _adapt_to_intent(self, intent: str) -> None:
+        """Adapt agent parameters based on detected intent."""
+        if intent in self.intent_parameters:
+            params = self.intent_parameters[intent]
+            
+            self.novelty_threshold = params['novelty_threshold']
+            self.quality_threshold = params['quality_threshold']
+            self.underground_bias = params['underground_bias']
+            self.similarity_depth = params['similarity_depth']
+            
+            self.logger.info(
+                f"Adapted parameters for intent: {intent}",
+                novelty_threshold=self.novelty_threshold,
+                quality_threshold=self.quality_threshold,
+                underground_bias=self.underground_bias,
+                similarity_depth=self.similarity_depth
+            )
+        else:
+            self.logger.warning(f"Unknown intent: {intent}, using default parameters")
     
     async def process(self, state: MusicRecommenderState) -> MusicRecommenderState:
         """
@@ -99,12 +162,44 @@ class DiscoveryAgent(BaseAgent):
             entities = state.entities or {}
             intent_analysis = state.intent_analysis or {}
             
+            # 🔧 Get intent and adapt parameters accordingly
+            query_understanding = state.query_understanding
+            detected_intent = 'discovery'  # Default for discovery agent
+            
+            if query_understanding and hasattr(query_understanding, 'intent'):
+                # QueryUnderstanding is an object, get intent value
+                intent_from_query = query_understanding.intent.value if hasattr(query_understanding.intent, 'value') else str(query_understanding.intent)
+                detected_intent = intent_from_query
+                
+                # Add intent to intent_analysis if missing
+                if not intent_analysis.get('intent') and intent_from_query:
+                    intent_analysis['intent'] = intent_from_query
+                    self.logger.info(f"🔧 FIXED: Added intent '{intent_from_query}' to intent_analysis from query_understanding")
+            else:
+                self.logger.warning("No query_understanding or intent found in state, using default discovery parameters")
+            
+            # 🔧 CRITICAL FIX: For similarity-primary hybrids, treat as artist_similarity for candidate generation
+            candidate_generation_intent = detected_intent
+            if detected_intent == 'hybrid':
+                # Check if this is a similarity-primary hybrid
+                reasoning = intent_analysis.get('reasoning', '')
+                hybrid_subtype = intent_analysis.get('hybrid_subtype', '')
+                if (hybrid_subtype == 'similarity_primary' or 
+                    'similarity_primary' in reasoning or
+                    'Hybrid sub-type: similarity_primary' in reasoning):
+                    candidate_generation_intent = 'artist_similarity'
+                    self.logger.info(f"🔧 SIMILARITY-PRIMARY HYBRID: Using 'artist_similarity' for candidate generation instead of 'hybrid'")
+            
+            # 🚀 PHASE 2: Adapt agent parameters based on detected intent
+            self._adapt_to_intent(detected_intent)
+            
             # Phase 1: Generate candidates using shared generator with discovery strategy
             candidates = await self.candidate_generator.generate_candidate_pool(
                 entities=entities,
                 intent_analysis=intent_analysis,
                 agent_type="discovery",
-                target_candidates=self.target_candidates
+                target_candidates=self.target_candidates,
+                detected_intent=candidate_generation_intent  # Use the adjusted intent
             )
             
             self.logger.debug(f"Generated {len(candidates)} discovery candidates")
@@ -116,6 +211,45 @@ class DiscoveryAgent(BaseAgent):
             filtered_candidates = await self._filter_for_discovery(
                 scored_candidates, entities, intent_analysis
             )
+            
+            # 🔧 DEBUG: Log filtered candidates with scores for troubleshooting
+            target_artists = self._extract_target_artists(entities)
+            self.logger.info(f"Filtered candidates with scores:")
+            for i, candidate in enumerate(filtered_candidates[:10]):  # Show top 10
+                candidate_name = candidate.get('name', 'Unknown')
+                candidate_artist = candidate.get('artist', 'Unknown')
+                combined_score = candidate.get('combined_score', 0.0)
+                is_target = candidate_artist.lower() in [a.lower() for a in target_artists]
+                self.logger.info(f"  {i+1}. {candidate_name} by {candidate_artist} - Score: {combined_score:.3f} {'🎯 TARGET' if is_target else ''}")
+            
+            # 🔧 BOOST: Prioritize target artist tracks by boosting their combined scores
+            # Check for both pure artist_similarity and similarity-primary hybrids
+            is_similarity_intent = (
+                intent_analysis.get('intent') == 'artist_similarity' or
+                (intent_analysis.get('intent') == 'hybrid' and 
+                 ('similarity_primary' in intent_analysis.get('reasoning', '') or
+                  intent_analysis.get('hybrid_subtype') == 'similarity_primary'))
+            )
+            
+            if is_similarity_intent and target_artists:
+                self.logger.info(f"🔧 BOOSTING target artist tracks for similarity intent with artists: {target_artists}")
+                for candidate in filtered_candidates:
+                    candidate_artist = candidate.get('artist', '')
+                    if candidate_artist.lower() in [a.lower() for a in target_artists]:
+                        # Boost target artist tracks to ensure they rank higher
+                        original_score = candidate.get('combined_score', 0.0)
+                        candidate['combined_score'] = min(original_score + 0.3, 1.0)  # Boost by 0.3, cap at 1.0
+                        self.logger.info(f"🚀 BOOSTED target artist track: {candidate.get('name')} by {candidate_artist} from {original_score:.3f} to {candidate['combined_score']:.3f}")
+                
+                # Re-sort by combined score after boosting
+                filtered_candidates.sort(key=lambda x: x.get('combined_score', 0.0), reverse=True)
+                self.logger.info(f"Re-sorted after target artist boost - new top 5:")
+                for i, candidate in enumerate(filtered_candidates[:5]):
+                    candidate_name = candidate.get('name', 'Unknown')
+                    candidate_artist = candidate.get('artist', 'Unknown')
+                    combined_score = candidate.get('combined_score', 0.0)
+                    is_target = candidate_artist.lower() in [a.lower() for a in target_artists]
+                    self.logger.info(f"  {i+1}. {candidate_name} by {candidate_artist} - Score: {combined_score:.3f} {'🎯 TARGET' if is_target else ''}")
             
             # Phase 4: Create final recommendations with discovery reasoning
             recommendations = await self._create_discovery_recommendations(
@@ -201,6 +335,21 @@ class DiscoveryAgent(BaseAgent):
         """Calculate novelty score for discovery."""
         score = 0.0
         
+        # Get intent to adjust novelty criteria
+        intent = intent_analysis.get('intent', '').lower()
+        
+        # 🔧 FIX: Detect both pure artist_similarity and similarity-primary hybrids
+        is_artist_similarity = False
+        if intent == 'artist_similarity':
+            is_artist_similarity = True
+        elif intent == 'hybrid':
+            # Check for similarity-primary hybrid
+            reasoning = intent_analysis.get('reasoning', '')
+            hybrid_subtype = intent_analysis.get('hybrid_subtype', '')
+            if (hybrid_subtype == 'similarity_primary' or 
+                'similarity_primary' in reasoning):
+                is_artist_similarity = True
+        
         # Lower listener count = higher novelty
         listeners = candidate.get('listeners', 0)
         # Handle None values and ensure it's a number
@@ -212,16 +361,30 @@ class DiscoveryAgent(BaseAgent):
             except (ValueError, TypeError):
                 listeners = 0
         
-        if listeners == 0:
-            score += 0.5
-        elif listeners < 10000:
-            score += 0.4
-        elif listeners < 100000:
-            score += 0.3
-        elif listeners < 1000000:
-            score += 0.2
+        # For artist similarity, be more lenient with popularity thresholds
+        if is_artist_similarity:
+            if listeners == 0:
+                score += 0.5
+            elif listeners < 100000:  # Raised from 10k
+                score += 0.4
+            elif listeners < 1000000:  # Raised from 100k
+                score += 0.3
+            elif listeners < 10000000:  # New tier for artist similarity
+                score += 0.2
+            else:
+                score += 0.1
         else:
-            score += 0.1
+            # Original stricter thresholds for other intents
+            if listeners == 0:
+                score += 0.5
+            elif listeners < 10000:
+                score += 0.4
+            elif listeners < 100000:
+                score += 0.3
+            elif listeners < 1000000:
+                score += 0.2
+            else:
+                score += 0.1
         
         # Uncommon tags indicate novelty
         tags = candidate.get('tags', [])
@@ -331,21 +494,111 @@ class DiscoveryAgent(BaseAgent):
         intent_analysis: Dict[str, Any]
     ) -> List[Dict[str, Any]]:
         """Filter candidates for discovery criteria."""
-        filtered = []
+        # Extract relevant context
+        target_artists = self._extract_target_artists(entities)
         
-        for candidate in scored_candidates:
+        # 🔧 FIX: Properly detect artist similarity for both pure and hybrid intents
+        intent_value = (
+            intent_analysis.get('intent') or 
+            intent_analysis.get('primary_intent') or 
+            intent_analysis.get('detected_intent') or
+            'discovery'
+        )
+        
+        # 🔧 HYBRID SUPPORT: Check for similarity-primary hybrids
+        is_artist_similarity = False
+        if intent_value == 'artist_similarity':
+            is_artist_similarity = True
+        elif intent_value == 'hybrid':
+            # Check if this is a similarity-primary hybrid
+            reasoning = intent_analysis.get('reasoning', '')
+            hybrid_subtype = intent_analysis.get('hybrid_subtype', '')
+            
+            # Multiple ways to detect similarity-primary hybrid
+            if (hybrid_subtype == 'similarity_primary' or 
+                'similarity_primary' in reasoning or
+                'Hybrid sub-type: similarity_primary' in reasoning):
+                is_artist_similarity = True
+                self.logger.info(f"🔧 DETECTED SIMILARITY-PRIMARY HYBRID: Using artist similarity logic for hybrid query")
+            
+            # Fallback: If we have target artists and similarity phrases, assume similarity-primary
+            elif target_artists:
+                original_query = intent_analysis.get('original_query', entities.get('original_query', ''))
+                similarity_phrases = ['like', 'similar', 'sounds like', 'reminds me of', 'in the style of']
+                if any(phrase in original_query.lower() for phrase in similarity_phrases):
+                    is_artist_similarity = True
+                    self.logger.info(f"🔧 FALLBACK DETECTION: Query has artists + similarity phrases, treating as artist similarity")
+        
+        self.logger.info(f"🔧 ARTIST SIMILARITY DETECTION: intent_value='{intent_value}', is_artist_similarity={is_artist_similarity}, target_artists={target_artists}")
+        
+        self.logger.info(
+            f"Discovery filtering: {len(scored_candidates)} candidates, "
+            f"target_artists={target_artists}, is_artist_similarity={is_artist_similarity}"
+        )
+        
+        # 🔧 DEBUG: Check if we have candidates to process
+        self.logger.info(f"About to start filtering loop with {len(scored_candidates)} scored candidates")
+        
+        filtered = []
+        for i, candidate in enumerate(scored_candidates):
+            candidate_artist = candidate.get('artist', '')
+            candidate_name = candidate.get('name', 'Unknown')
+            
+            # 🔧 DEBUG: Log each candidate being processed (use info level to ensure visibility)
+            self.logger.info(f"Processing candidate {i+1}/{len(scored_candidates)}: '{candidate_name}' by '{candidate_artist}'")
+            
+            # ✅ SPECIAL HANDLING: For artist similarity, prioritize target artist tracks
+            if is_artist_similarity and target_artists:
+                # If this is a track by the target artist, use relaxed thresholds
+                is_target_artist_track = any(
+                    target.lower() in candidate_artist.lower() or candidate_artist.lower() in target.lower()
+                    for target in target_artists
+                )
+                
+                # 🔧 DEBUG: Log matching results
+                if is_target_artist_track:
+                    self.logger.info(f"🎯 MATCHED target artist: '{candidate_artist}' matches {target_artists}")
+                
+                if is_target_artist_track:
+                    # Very relaxed thresholds for target artist tracks
+                    quality_score = candidate.get('quality_score', 0)
+                    self.logger.info(
+                        f"Target artist track: {candidate_name} by {candidate_artist}, "
+                        f"quality={quality_score}"
+                    )
+                    if quality_score >= 0.2:  # Much lower threshold for target artist
+                        filtered.append(candidate)
+                        self.logger.info(f"✅ ACCEPTED target artist track: {candidate_name}")
+                        continue
+                    else:
+                        self.logger.info(
+                            f"❌ REJECTED target artist track (low quality): {candidate_name}"
+                        )
+            
+            # Standard discovery filtering for non-target tracks
             # Quality threshold check (lower for discovery)
             quality_score = candidate.get('quality_score', 0)
             if quality_score is None:
                 quality_score = 0
             if quality_score < self.quality_threshold:
+                self.logger.debug(f"❌ REJECTED (quality): {candidate_name} by {candidate_artist}, quality={quality_score} < {self.quality_threshold}")
                 continue
             
-            # Novelty threshold check
+            # 🔧 FIX: Relaxed novelty threshold for artist similarity
             novelty_score = candidate.get('novelty_score', 0)
             if novelty_score is None:
                 novelty_score = 0
-            if novelty_score < self.novelty_threshold:
+            
+            # Use different novelty thresholds based on query type
+            if is_artist_similarity:
+                # Much more lenient for artist similarity - we want similar artists!
+                novelty_threshold = 0.15  # Lowered from 0.4
+                self.logger.debug(f"Using relaxed novelty threshold {novelty_threshold} for artist similarity")
+            else:
+                novelty_threshold = self.novelty_threshold
+            
+            if novelty_score < novelty_threshold:
+                self.logger.debug(f"❌ REJECTED (novelty): {candidate_name} by {candidate_artist}, novelty={novelty_score} < {novelty_threshold}")
                 continue
             
             # Underground bias check
@@ -353,43 +606,80 @@ class DiscoveryAgent(BaseAgent):
             if underground_score is None:
                 underground_score = 0
             if underground_score < 0.2:
+                self.logger.debug(f"❌ REJECTED (underground): {candidate_name} by {candidate_artist}, underground={underground_score} < 0.2")
                 continue
             
+            self.logger.debug(f"✅ ACCEPTED: {candidate_name} by {candidate_artist}")
             filtered.append(candidate)
         
+        self.logger.info(f"Discovery filtering result: {len(scored_candidates)} -> {len(filtered)} candidates")
+        
         # Ensure diversity and novelty
-        filtered = self._ensure_discovery_diversity(filtered)
+        filtered = self._ensure_discovery_diversity(filtered, intent_analysis)
         
         return filtered
     
-    def _ensure_discovery_diversity(self, candidates: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    def _ensure_discovery_diversity(self, candidates: List[Dict[str, Any]], intent_analysis: Dict[str, Any]) -> List[Dict[str, Any]]:
         """Ensure diversity in discovery recommendations."""
-        seen_artists = set()
+        seen_artists = {}  # Changed to dict to track count per artist
         seen_genres = set()
         diverse_candidates = []
         
+        # Get intent to adjust diversity rules
+        intent = intent_analysis.get('intent', '').lower()
+        
+        # For artist_similarity, allow more tracks per similar artist
+        max_tracks_per_artist = 3 if intent == 'artist_similarity' else 1
+        
+        # 🔧 DEBUG: Log diversity filtering process
+        self.logger.info(f"🔧 DEBUG: Starting diversity filtering with {len(candidates)} candidates")
+        self.logger.info(f"🔧 DEBUG: Intent: {intent}, max tracks per artist: {max_tracks_per_artist}")
+        
         for candidate in candidates:
             artist = candidate.get('artist', '').lower()
+            candidate_name = candidate.get('name', 'Unknown')
             tags = candidate.get('tags', [])
             
-            # Skip if we already have this artist
-            if artist in seen_artists:
+            # 🔧 DEBUG: Log DIJON tracks specifically
+            if 'dijon' in artist or 'jai paul' in artist:
+                self.logger.info(f"🔧 DEBUG: Processing diversity for {candidate_name} by {artist}")
+                self.logger.info(f"🔧 DEBUG: Artist track count: {seen_artists.get(artist, 0)}")
+                self.logger.info(f"🔧 DEBUG: Tags: {tags[:3]}")
+            
+            # Check artist limit (was previously just 1)
+            artist_count = seen_artists.get(artist, 0)
+            if artist_count >= max_tracks_per_artist:
+                if 'dijon' in artist or 'jai paul' in artist:
+                    msg = f"❌ DEBUG: REJECTED {candidate_name} - artist limit reached ({artist_count}/{max_tracks_per_artist})"
+                    self.logger.info(msg)
                 continue
             
             # Limit genre repetition
             candidate_genres = [tag.lower() for tag in tags[:3]]
             genre_overlap = len(set(candidate_genres) & seen_genres)
             if genre_overlap > 1:  # Allow some overlap but not too much
+                if 'dijon' in artist or 'jai paul' in artist:
+                    msg = f"❌ DEBUG: REJECTED {candidate_name} - genre overlap {genre_overlap} > 1"
+                    self.logger.info(msg)
+                    self.logger.info(f"🔧 DEBUG: Candidate genres: {candidate_genres}, seen genres: {list(seen_genres)}")
                 continue
             
-            seen_artists.add(artist)
+            # Accept the candidate
+            seen_artists[artist] = artist_count + 1
             seen_genres.update(candidate_genres)
             diverse_candidates.append(candidate)
             
+            # 🔧 DEBUG: Log acceptance
+            if 'dijon' in artist or 'jai paul' in artist:
+                msg = f"✅ DEBUG: ACCEPTED {candidate_name} for diversity (track {seen_artists[artist]}/{max_tracks_per_artist})"
+                self.logger.info(msg)
+            
             # Limit to prevent over-filtering
             if len(diverse_candidates) >= self.final_recommendations * 2:
+                self.logger.info(f"🔧 DEBUG: Reached diversity limit of {self.final_recommendations * 2}")
                 break
         
+        self.logger.info(f"🔧 DEBUG: Diversity filtering: {len(candidates)} -> {len(diverse_candidates)} candidates")
         return diverse_candidates
     
     async def _create_discovery_recommendations(
@@ -421,7 +711,22 @@ class DiscoveryAgent(BaseAgent):
                     explanation=reasoning,
                     novelty_score=candidate.get('novelty_score', 0.0),
                     quality_score=candidate.get('quality_score', 0.0),
-                    advocate_source_agent='discovery_agent'
+                    advocate_source_agent='discovery_agent',
+                    # 🔧 FIXED: Preserve popularity data for ranking
+                    raw_source_data={
+                        'playcount': candidate.get('playcount', 0),
+                        'listeners': candidate.get('listeners', 0),
+                        'popularity': candidate.get('popularity', 0),
+                        'tags': candidate.get('tags', []),
+                        'novelty_score': candidate.get('novelty_score', 0.0),
+                        'underground_score': candidate.get('underground_score', 0.0)
+                    },
+                    additional_scores={
+                        'combined_score': candidate.get('combined_score', 0.5),
+                        'novelty_score': candidate.get('novelty_score', 0.0),
+                        'quality_score': candidate.get('quality_score', 0.0),
+                        'underground_score': candidate.get('underground_score', 0.0)
+                    }
                 )
                 
                 recommendations.append(recommendation)

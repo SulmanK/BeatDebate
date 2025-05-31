@@ -179,6 +179,18 @@ class BeatDebateLogger:
     def _configure_component_loggers(self):
         """Configure specific loggers for different components."""
         
+        # If global log level is DEBUG, don't override component levels
+        # This allows all modules to show debug logs when LOG_LEVEL=DEBUG
+        if self.log_level == logging.DEBUG:
+            # When debugging, we want to see logs from all components
+            # Only reduce noise from truly external libraries
+            external_modules = ["httpx", "requests", "urllib3", "urllib3.connectionpool"]
+            for ext_module in external_modules:
+                logger = logging.getLogger(ext_module)
+                logger.setLevel(logging.WARNING)  # Still reduce noise from HTTP libraries
+            return
+        
+        # Normal operation: apply component-specific log levels
         # UI loggers (less verbose)
         ui_modules = ["src.ui.chat_interface", "src.ui.response_formatter"]
         for ui_module in ui_modules:
@@ -186,7 +198,7 @@ class BeatDebateLogger:
             logger.setLevel(self.component_levels["ui"])
         
         # External API loggers (reduce noise)
-        external_modules = ["httpx", "requests", "urllib3"]
+        external_modules = ["httpx", "requests", "urllib3", "urllib3.connectionpool"]
         for ext_module in external_modules:
             logger = logging.getLogger(ext_module)
             logger.setLevel(self.component_levels["external"])

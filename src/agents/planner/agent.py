@@ -102,10 +102,15 @@ class PlannerAgent(BaseAgent):
             )
             state.query_understanding = query_understanding
             
+            # Phase 1.5: Convert understanding to entities structure for agents
+            entities = self._convert_understanding_to_entities(query_understanding)
+            state.entities = entities
+            
             # Phase 2: Task Analysis
             task_analysis = await self._analyze_task_complexity(
                 state.user_query, query_understanding
             )
+            state.intent_analysis = task_analysis  # Also set intent_analysis for agents
             
             # Phase 3: Planning Strategy Creation
             planning_strategy = await self._create_planning_strategy(
@@ -175,6 +180,74 @@ class PlannerAgent(BaseAgent):
                 normalized_query=user_query.lower(),
                 reasoning="Fallback understanding due to processing error"
             )
+    
+    def _convert_understanding_to_entities(self, understanding: QueryUnderstanding) -> Dict[str, Any]:
+        """
+        Convert QueryUnderstanding object to the entities structure expected by agents.
+        
+        Args:
+            understanding: QueryUnderstanding object from query understanding engine
+            
+        Returns:
+            Entities dictionary with proper nested structure
+        """
+        # Create properly structured entities dict
+        entities = {
+            "musical_entities": {
+                "artists": {
+                    "primary": understanding.artists,
+                    "similar_to": []  # All artists from similarity queries go to primary for now
+                },
+                "genres": {
+                    "primary": understanding.genres,
+                    "secondary": []
+                },
+                "tracks": {
+                    "primary": [],
+                    "referenced": []
+                },
+                "moods": {
+                    "primary": understanding.moods,
+                    "energy": [],
+                    "emotion": []
+                }
+            },
+            "contextual_entities": {
+                "activities": {
+                    "physical": understanding.activities,
+                    "mental": [],
+                    "social": []
+                },
+                "temporal": {
+                    "decades": [],
+                    "periods": []
+                }
+            },
+            "confidence_scores": {
+                "overall": understanding.confidence
+            },
+            "extraction_method": "llm_query_understanding",
+            "intent_analysis": {
+                "intent": understanding.intent.value,
+                "similarity_type": understanding.similarity_type.value if understanding.similarity_type else None,
+                "confidence": understanding.confidence
+            }
+        }
+        
+        # For similarity queries, put artists in similar_to instead of primary
+        if understanding.intent == QueryIntent.ARTIST_SIMILARITY and understanding.artists:
+            entities["musical_entities"]["artists"]["similar_to"] = understanding.artists
+            entities["musical_entities"]["artists"]["primary"] = []
+        
+        self.logger.debug(
+            "Converted QueryUnderstanding to entities",
+            artists_count=len(understanding.artists),
+            genres_count=len(understanding.genres),
+            moods_count=len(understanding.moods),
+            intent=understanding.intent.value
+        )
+        
+        return entities
     
     async def _analyze_task_complexity(
         self, user_query: str, understanding: QueryUnderstanding
@@ -414,28 +487,41 @@ Provide enhanced analysis in the specified JSON format."""
         intent = understanding.intent.value
         complexity = task_analysis.get('complexity_level', 'medium')
         
-        # Base sequences by intent
+        # Intent-aware sequences from design document
         intent_sequences = {
-            'discovery': ['genre_mood', 'discovery', 'judge'],
-            'similarity': ['genre_mood', 'judge'],
+            'artist_similarity': ['discovery', 'judge'],
+            'discovery': ['discovery', 'judge'],
+            'genre_mood': ['genre_mood', 'discovery', 'judge'],
+            'contextual': ['genre_mood', 'judge'],
+            'hybrid': ['discovery', 'genre_mood', 'judge'],
+            
+            # Legacy compatibility mappings
+            'similarity': ['discovery', 'judge'],
+            'genre_exploration': ['genre_mood', 'discovery', 'judge'],
+            'mood_matching': ['genre_mood', 'discovery', 'judge'],
+            'activity_context': ['genre_mood', 'judge'],
             'mood_based': ['genre_mood', 'judge'],
             'activity_based': ['genre_mood', 'judge'],
             'genre_specific': ['genre_mood', 'judge']
         }
         
         base_sequence = intent_sequences.get(
-            intent, ['genre_mood', 'judge']
+            intent, ['genre_mood', 'judge']  # Default fallback
         )
         
-        # Adjust based on complexity
+        # Adjust based on complexity for edge cases
         if complexity == 'complex':
-            # Add discovery agent for complex queries
-            if 'discovery' not in base_sequence:
+            # For complex queries, ensure discovery agent is included
+            if 'discovery' not in base_sequence and intent != 'contextual':
                 base_sequence.insert(-1, 'discovery')
         elif complexity == 'simple':
-            # Simplify sequence for simple queries
-            if len(base_sequence) > 2:
-                base_sequence = base_sequence[:2]
+            # For simple queries, we can sometimes simplify but keep intent focus
+            if intent == 'discovery' and len(base_sequence) > 2:
+                # For simple discovery, just discovery + judge
+                base_sequence = ['discovery', 'judge']
+            elif intent == 'contextual' and len(base_sequence) > 2:
+                # For simple contextual, just genre_mood + judge
+                base_sequence = ['genre_mood', 'judge']
         
         return base_sequence
     

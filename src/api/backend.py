@@ -19,7 +19,6 @@ from pydantic import BaseModel, Field
 from ..services.enhanced_recommendation_service import (
     EnhancedRecommendationService,
     RecommendationRequest as ServiceRequest,
-    RecommendationResponse as ServiceResponse,
     get_recommendation_service
 )
 from ..services.api_service import get_api_service, close_api_service
@@ -204,7 +203,29 @@ async def health_check():
     )
 
 
-@app.post("/recommendations", response_model=ServiceResponse)
+def transform_unified_to_ui_format(unified_track: UnifiedTrackMetadata) -> Dict:
+    """Transform UnifiedTrackMetadata to UI-expected format."""
+    return {
+        "title": unified_track.name,
+        "artist": unified_track.artist,
+        "album": unified_track.album,
+        "confidence": unified_track.recommendation_score or 0.0,
+        "explanation": unified_track.recommendation_reason or "",
+        "source": unified_track.agent_source or "unknown",
+        "genres": unified_track.genres,
+        "moods": unified_track.tags,  # tags are used as moods
+        "preview_url": unified_track.preview_url,
+        "spotify_url": unified_track.external_urls.get("spotify") if unified_track.external_urls else None,
+        "quality_score": unified_track.quality_score,
+        "novelty_score": unified_track.underground_score,  # underground_score is used as novelty
+        # Additional metadata
+        "popularity": unified_track.popularity,
+        "listeners": unified_track.listeners,
+        "playcount": unified_track.playcount
+    }
+
+
+@app.post("/recommendations")
 async def get_recommendations(request: RecommendationRequest):
     """
     Get music recommendations using the 4-agent system.
@@ -233,23 +254,24 @@ async def get_recommendations(request: RecommendationRequest):
             )
         ]
         
-        return ServiceResponse(
-            recommendations=demo_tracks,
-            strategy_used={"type": "demo", "reason": "Service not available"},
-            reasoning=[
+        # Transform to UI format and return as dict
+        return {
+            "recommendations": [transform_unified_to_ui_format(track) for track in demo_tracks],
+            "strategy_used": {"type": "demo", "reason": "Service not available"},
+            "reasoning": [
                 "Demo: PlannerAgent analyzed request",
                 "Demo: GenreMoodAgent found tracks",
                 "Demo: JudgeAgent selected recommendations"
             ],
-            session_id=request.session_id or "demo_session",
-            processing_time=1.5,
-            metadata={
+            "session_id": request.session_id or "demo_session",
+            "processing_time": 1.5,
+            "metadata": {
                 "demo_mode": True,
                 "agents_used": ["demo"],
                 "total_candidates": 2,
                 "final_count": 2
             }
-        )
+        }
     
     start_time = time.time()
     
@@ -270,11 +292,20 @@ async def get_recommendations(request: RecommendationRequest):
         execution_time = time.time() - start_time
         logger.info(f"Recommendation completed in {execution_time:.2f}s")
         
-        # The result is already a ServiceResponse, just update metadata
-        result.processing_time = execution_time
-        result.session_id = request.session_id or result.session_id
+        # Transform recommendations to UI format
+        transformed_recommendations = []
+        for track in result.recommendations:
+            transformed_recommendations.append(transform_unified_to_ui_format(track))
         
-        return result
+        # Return as dictionary for JSON serialization
+        return {
+            "recommendations": transformed_recommendations,
+            "strategy_used": result.strategy_used,
+            "reasoning": result.reasoning,
+            "session_id": request.session_id or result.session_id,
+            "processing_time": execution_time,
+            "metadata": result.metadata
+        }
         
     except Exception as e:
         logger.error(f"Recommendation failed: {e}")
@@ -284,7 +315,7 @@ async def get_recommendations(request: RecommendationRequest):
         )
 
 
-@app.post("/planning", response_model=PlanningResponse)
+@app.post("/planning")
 async def get_planning_strategy(request: RecommendationRequest):
     """
     Get the planning strategy without executing full recommendations.

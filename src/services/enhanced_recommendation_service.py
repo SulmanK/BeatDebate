@@ -189,7 +189,7 @@ class EnhancedRecommendationService:
             raise
     
     def _build_workflow_graph(self) -> StateGraph:
-        """Build the LangGraph workflow."""
+        """Build the LangGraph workflow with conditional routing."""
         workflow = StateGraph(MusicRecommenderState)
         
         # Add nodes
@@ -198,83 +198,262 @@ class EnhancedRecommendationService:
         workflow.add_node("discovery_advocate", self._discovery_node)
         workflow.add_node("judge", self._judge_node)
         
-        # Add edges
+        # Set entry point
         workflow.set_entry_point("planner")
-        workflow.add_edge("planner", "genre_mood_advocate")
-        workflow.add_edge("planner", "discovery_advocate")
+        
+        # 🔧 INTENT-AWARE ROUTING: Add conditional edges based on planner's agent sequence
+        workflow.add_conditional_edges(
+            "planner",
+            self._route_agents,  # Router function that respects intent-aware sequences
+            {
+                "discovery_only": "discovery_advocate",
+                "genre_mood_only": "genre_mood_advocate", 
+                "both_agents": "discovery_advocate",  # 🔧 FIXED: Start with discovery, then genre_mood
+                "judge_only": "judge"  # For edge cases
+            }
+        )
+        
+        # 🔧 FIXED: Add conditional edges from discovery to either genre_mood or judge
+        workflow.add_conditional_edges(
+            "discovery_advocate",
+            self._route_after_discovery,
+            {
+                "to_genre_mood": "genre_mood_advocate",
+                "to_judge": "judge"
+            }
+        )
+        
+        # Add edges from agents to judge
         workflow.add_edge("genre_mood_advocate", "judge")
-        workflow.add_edge("discovery_advocate", "judge")
         workflow.add_edge("judge", END)
         
         return workflow.compile()
     
-    async def _planner_node(self, state: MusicRecommenderState) -> MusicRecommenderState:
-        """Execute planner agent."""
+    def _route_agents(self, state: MusicRecommenderState) -> str:
+        """
+        Route to appropriate agents based on planner's intent-aware sequence.
+        
+        Returns:
+            Route key for conditional edges
+        """
+        try:
+            # Get the agent sequence from planner's strategy
+            planning_strategy = getattr(state, 'planning_strategy', {})
+            agent_sequence = planning_strategy.get('agent_sequence', ['discovery', 'genre_mood', 'judge'])
+            
+            self.logger.info(f"🔧 ROUTER: Agent sequence from planner: {agent_sequence}")
+            
+            # Route based on which agents are in the sequence (excluding 'judge')
+            agents_to_run = [agent for agent in agent_sequence if agent != 'judge']
+            
+            if 'discovery' in agents_to_run and 'genre_mood' in agents_to_run:
+                self.logger.info("🔧 ROUTER: Running both discovery and genre_mood agents")
+                return "both_agents"
+            elif 'discovery' in agents_to_run:
+                self.logger.info("🔧 ROUTER: Running discovery agent only")
+                return "discovery_only"
+            elif 'genre_mood' in agents_to_run:
+                self.logger.info("🔧 ROUTER: Running genre_mood agent only")
+                return "genre_mood_only"
+            else:
+                self.logger.warning("🔧 ROUTER: No valid agents in sequence, defaulting to both")
+                return "both_agents"
+                
+        except Exception as e:
+            self.logger.error(f"🔧 ROUTER: Error in routing, defaulting to both agents: {e}")
+            return "both_agents"
+    
+    def _route_after_discovery(self, state: MusicRecommenderState) -> str:
+        """
+        Route after discovery agent based on planner's intent-aware sequence.
+        
+        Returns:
+            Route key for conditional edges after discovery
+        """
+        try:
+            # Get the agent sequence from planner's strategy
+            planning_strategy = getattr(state, 'planning_strategy', {})
+            agent_sequence = planning_strategy.get('agent_sequence', ['discovery', 'genre_mood', 'judge'])
+            
+            self.logger.info(f"🔧 ROUTER: After discovery, checking sequence: {agent_sequence}")
+            
+            # If genre_mood is in the sequence after discovery, route to it
+            if 'genre_mood' in agent_sequence:
+                self.logger.info("🔧 ROUTER: Routing from discovery to genre_mood")
+                return "to_genre_mood"
+            else:
+                self.logger.info("🔧 ROUTER: Routing from discovery directly to judge")
+                return "to_judge"
+                
+        except Exception as e:
+            self.logger.error(f"🔧 ROUTER: Error in post-discovery routing, defaulting to genre_mood: {e}")
+            return "to_genre_mood"
+    
+    async def _planner_node(self, state: MusicRecommenderState) -> Dict[str, Any]:
+        """Execute planner agent and return field updates as a dictionary."""
         try:
             self.logger.info("Executing planner node")
             updated_state = await self.planner_agent.process(state)
             
-            if hasattr(updated_state, 'reasoning_log'):
-                updated_state.reasoning_log.append("Planner: Strategy created")
+            # Return only the fields that were updated by the planner agent
+            updates = {}
             
-            return updated_state
+            # Extract planner-specific fields
+            if hasattr(updated_state, 'planning_strategy') and updated_state.planning_strategy:
+                updates["planning_strategy"] = updated_state.planning_strategy
+            
+            if hasattr(updated_state, 'query_understanding') and updated_state.query_understanding:
+                updates["query_understanding"] = updated_state.query_understanding
+                
+            if hasattr(updated_state, 'agent_coordination') and updated_state.agent_coordination:
+                updates["agent_coordination"] = updated_state.agent_coordination
+                
+            if hasattr(updated_state, 'entities') and updated_state.entities:
+                updates["entities"] = updated_state.entities
+                
+            if hasattr(updated_state, 'intent_analysis') and updated_state.intent_analysis:
+                updates["intent_analysis"] = updated_state.intent_analysis
+            
+            # Extract updated reasoning log
+            if hasattr(updated_state, 'reasoning_log') and updated_state.reasoning_log:
+                updates["reasoning_log"] = updated_state.reasoning_log
+            
+            # Extract error info if present
+            if hasattr(updated_state, 'error_info') and updated_state.error_info:
+                updates["error_info"] = updated_state.error_info
+            
+            self.logger.info(f"Planner node completed, returning {len(updates)} field updates")
+            return updates
             
         except Exception as e:
-            self.logger.error("Planner node failed", error=str(e))
-            if hasattr(state, 'reasoning_log'):
-                state.reasoning_log.append(f"Planner: Error - {str(e)}")
-            return state
+            self.logger.error("Planner node failed", error=str(e), exc_info=True)
+            current_log = list(getattr(state, 'reasoning_log', []))
+            current_log.append(f"Planner: Error - {str(e)}")
+            return {
+                "error_info": {"agent": "PlannerAgent", "message": str(e)},
+                "reasoning_log": current_log
+            }
     
-    async def _genre_mood_node(self, state: MusicRecommenderState) -> MusicRecommenderState:
-        """Execute genre/mood advocate agent."""
+    async def _genre_mood_node(self, state: MusicRecommenderState) -> Dict[str, Any]:
+        """Execute genre/mood agent and return field updates as a dictionary."""
         try:
             self.logger.info("Executing genre/mood advocate node")
             updated_state = await self.genre_mood_agent.process(state)
             
-            if hasattr(updated_state, 'reasoning_log'):
-                updated_state.reasoning_log.append("GenreMood: Recommendations generated")
+            # Return only the fields that were updated by the genre/mood agent
+            updates = {}
             
-            return updated_state
+            # Extract genre/mood recommendations
+            if hasattr(updated_state, 'genre_mood_recommendations') and updated_state.genre_mood_recommendations:
+                updates["genre_mood_recommendations"] = updated_state.genre_mood_recommendations
+                self.logger.debug(f"Genre/mood node returning {len(updated_state.genre_mood_recommendations)} recommendations")
+            
+            # Extract updated reasoning log
+            if hasattr(updated_state, 'reasoning_log') and updated_state.reasoning_log:
+                updates["reasoning_log"] = updated_state.reasoning_log
+            
+            # Extract error info if present
+            if hasattr(updated_state, 'error_info') and updated_state.error_info:
+                updates["error_info"] = updated_state.error_info
+            
+            self.logger.info(f"Genre/mood node completed, returning {len(updates)} field updates")
+            return updates
             
         except Exception as e:
-            self.logger.error("Genre/mood node failed", error=str(e))
-            if hasattr(state, 'reasoning_log'):
-                state.reasoning_log.append(f"GenreMood: Error - {str(e)}")
-            return state
+            self.logger.error("Genre/mood node failed", error=str(e), exc_info=True)
+            current_log = list(getattr(state, 'reasoning_log', []))
+            current_log.append(f"GenreMood: Error - {str(e)}")
+            return {
+                "error_info": {"agent": "GenreMoodAgent", "message": str(e)},
+                "reasoning_log": current_log
+            }
     
-    async def _discovery_node(self, state: MusicRecommenderState) -> MusicRecommenderState:
-        """Execute discovery advocate agent."""
+    async def _discovery_node(self, state: MusicRecommenderState) -> Dict[str, Any]:
+        """Execute discovery agent and return field updates as a dictionary."""
         try:
             self.logger.info("Executing discovery advocate node")
             updated_state = await self.discovery_agent.process(state)
             
-            if hasattr(updated_state, 'reasoning_log'):
-                updated_state.reasoning_log.append("Discovery: Recommendations generated")
+            # Return only the fields that were updated by the discovery agent
+            updates = {}
             
-            return updated_state
+            # Extract discovery recommendations
+            if hasattr(updated_state, 'discovery_recommendations') and updated_state.discovery_recommendations:
+                updates["discovery_recommendations"] = updated_state.discovery_recommendations
+                self.logger.debug(f"Discovery node returning {len(updated_state.discovery_recommendations)} recommendations")
+            
+            # Extract updated reasoning log
+            if hasattr(updated_state, 'reasoning_log') and updated_state.reasoning_log:
+                updates["reasoning_log"] = updated_state.reasoning_log
+            
+            # Extract error info if present
+            if hasattr(updated_state, 'error_info') and updated_state.error_info:
+                updates["error_info"] = updated_state.error_info
+            
+            self.logger.info(f"Discovery node completed, returning {len(updates)} field updates")
+            return updates
             
         except Exception as e:
-            self.logger.error("Discovery node failed", error=str(e))
-            if hasattr(state, 'reasoning_log'):
-                state.reasoning_log.append(f"Discovery: Error - {str(e)}")
-            return state
+            self.logger.error("Discovery node failed", error=str(e), exc_info=True)
+            current_log = list(getattr(state, 'reasoning_log', []))
+            current_log.append(f"Discovery: Error - {str(e)}")
+            return {
+                "error_info": {"agent": "DiscoveryAgent", "message": str(e)},
+                "reasoning_log": current_log
+            }
     
-    async def _judge_node(self, state: MusicRecommenderState) -> MusicRecommenderState:
-        """Execute judge agent."""
+    async def _judge_node(self, state: MusicRecommenderState) -> Dict[str, Any]:
+        """Execute judge agent and return field updates as a dictionary."""
         try:
             self.logger.info("Executing judge node")
             updated_state = await self.judge_agent.evaluate_and_select(state)
             
-            if hasattr(updated_state, 'reasoning_log'):
-                updated_state.reasoning_log.append("Judge: Final recommendations selected")
+            # Debug: log the updated_state details
+            self.logger.debug(f"Judge agent returned state type: {type(updated_state)}")
+            if hasattr(updated_state, '__dict__'):
+                self.logger.debug(f"Judge agent state dict keys: {list(updated_state.__dict__.keys())}")
+                if hasattr(updated_state, 'final_recommendations'):
+                    self.logger.debug(f"final_recommendations type: {type(updated_state.final_recommendations)}, length: {len(updated_state.final_recommendations) if updated_state.final_recommendations else 0}")
             
-            return updated_state
+            # Return only the fields that were updated by the judge agent
+            updates = {}
+            
+            # Extract final_recommendations - this is the critical field
+            if hasattr(updated_state, 'final_recommendations') and updated_state.final_recommendations is not None:
+                updates["final_recommendations"] = updated_state.final_recommendations
+                self.logger.debug(f"Judge node returning {len(updated_state.final_recommendations)} final recommendations")
+            else:
+                updates["final_recommendations"] = []
+                self.logger.warning("Judge agent did not produce final_recommendations")
+            
+            # Extract updated reasoning log
+            # Always update reasoning log with judge's message
+            current_log = list(getattr(state, 'reasoning_log', []))
+            if hasattr(updated_state, 'reasoning_log') and updated_state.reasoning_log:
+                # If the judge agent added to the reasoning log, use that
+                updates["reasoning_log"] = updated_state.reasoning_log
+            else:
+                # Otherwise, just add our message to the existing log
+                current_log.append("Judge: Final recommendations selected")
+                updates["reasoning_log"] = current_log
+            
+            # Extract error info if present
+            if hasattr(updated_state, 'error_info') and updated_state.error_info:
+                updates["error_info"] = updated_state.error_info
+            
+            self.logger.info(f"Judge node completed, returning {len(updates)} field updates")
+            return updates
             
         except Exception as e:
-            self.logger.error("Judge node failed", error=str(e))
-            if hasattr(state, 'reasoning_log'):
-                state.reasoning_log.append(f"Judge: Error - {str(e)}")
-            return state
+            self.logger.error("Judge node failed", error=str(e), exc_info=True)
+            # Return error state as dictionary
+            current_log = list(getattr(state, 'reasoning_log', []))
+            current_log.append(f"Judge: Error - {str(e)}")
+            return {
+                "final_recommendations": [],
+                "error_info": {"agent": "JudgeAgent", "message": str(e)},
+                "reasoning_log": current_log
+            }
     
     async def get_recommendations(
         self,
@@ -315,20 +494,31 @@ class EnhancedRecommendationService:
             
             # Debug: Check what's actually in the final state
             self.logger.debug(f"Final state type: {type(final_state)}")
-            self.logger.debug(f"Final state attributes: {dir(final_state)}")
-            self.logger.debug(f"Final state dict: {final_state.__dict__ if hasattr(final_state, '__dict__') else 'No __dict__'}")
+            self.logger.debug(f"Is final_state a dict? {isinstance(final_state, dict)}")
+            self.logger.debug(f"Is final_state a MusicRecommenderState? {isinstance(final_state, MusicRecommenderState)}")
+            
+            if isinstance(final_state, dict):
+                self.logger.debug(f"Final state dict keys: {list(final_state.keys())}")
+                if 'final_recommendations' in final_state:
+                    self.logger.debug(f"final_recommendations in dict, length: {len(final_state['final_recommendations'])}")
+            elif hasattr(final_state, '__dict__'):
+                self.logger.debug(f"Final state attributes: {dir(final_state)}")
+                self.logger.debug(f"Final state dict: {final_state.__dict__ if hasattr(final_state, '__dict__') else 'No __dict__'}")
             
             # Try multiple ways to access final_recommendations
             final_recommendations = None
-            if hasattr(final_state, 'final_recommendations'):
+            
+            # First check if it's a dictionary
+            if isinstance(final_state, dict):
+                final_recommendations = final_state.get('final_recommendations', [])
+                self.logger.debug(f"Found final_recommendations in dict: {len(final_recommendations) if final_recommendations else 0} items")
+            # Then check if it's an object with attributes
+            elif hasattr(final_state, 'final_recommendations'):
                 final_recommendations = final_state.final_recommendations
                 self.logger.debug(f"Found final_recommendations via hasattr: {len(final_recommendations) if final_recommendations else 'None'}")
             else:
-                self.logger.warning("final_recommendations attribute not found in final_state")
-            
-            if final_recommendations is None:
-                final_recommendations = getattr(final_state, 'final_recommendations', [])
-                self.logger.debug(f"Found final_recommendations via getattr: {len(final_recommendations)}")
+                self.logger.warning("final_recommendations not found in final_state (neither dict nor attribute)")
+                final_recommendations = []
             
             if not final_recommendations:
                 # Fallback: check if recommendations are in other fields
@@ -351,16 +541,28 @@ class EnhancedRecommendationService:
             
             processing_time = asyncio.get_event_loop().time() - start_time
             
+            # Extract fields from final_state (handle both dict and object)
+            if isinstance(final_state, dict):
+                strategy_used = final_state.get('planning_strategy', {})
+                reasoning_log = final_state.get('reasoning_log', [])
+                session_id = final_state.get('session_id', request.session_id or "default")
+                query_understanding = final_state.get('query_understanding', None)
+            else:
+                strategy_used = getattr(final_state, 'planning_strategy', {})
+                reasoning_log = getattr(final_state, 'reasoning_log', [])
+                session_id = getattr(final_state, 'session_id', request.session_id or "default")
+                query_understanding = getattr(final_state, 'query_understanding', None)
+            
             response = RecommendationResponse(
                 recommendations=unified_recommendations,
-                strategy_used=getattr(final_state, 'strategy', {}),
-                reasoning=getattr(final_state, 'reasoning_log', []),
-                session_id=getattr(final_state, 'session_id', request.session_id or "default"),
+                strategy_used=strategy_used,
+                reasoning=reasoning_log,
+                session_id=session_id,
                 processing_time=processing_time,
                 metadata={
                     "context_decision": context_decision,
                     "agents_used": ["planner", "genre_mood", "discovery", "judge"],
-                    "total_candidates": len(getattr(final_state, 'all_recommendations', [])),
+                    "total_candidates": len(getattr(final_state, 'all_recommendations', [])) if not isinstance(final_state, dict) else 0,
                     "final_count": len(unified_recommendations)
                 }
             )
@@ -369,7 +571,7 @@ class EnhancedRecommendationService:
             await self.context_manager.update_context_after_recommendation(
                 session_id=response.session_id,
                 query=request.query,
-                llm_understanding=getattr(final_state, 'query_understanding', None),
+                llm_understanding=query_understanding,
                 recommendations=[rec.to_dict() for rec in unified_recommendations],
                 context_decision=context_decision
             )
@@ -420,6 +622,10 @@ class EnhancedRecommendationService:
         """
         unified_tracks = []
         
+        self.logger.debug(f"Converting {len(recommendations)} recommendations to unified metadata")
+        for i, rec in enumerate(recommendations):
+            self.logger.debug(f"Recommendation {i}: type={type(rec)}, keys={list(rec.keys()) if isinstance(rec, dict) else 'N/A'}")
+        
         for rec in recommendations:
             try:
                 # Handle both TrackRecommendation objects and dictionaries
@@ -450,11 +656,38 @@ class EnhancedRecommendationService:
                     include_audio_features=include_audio_features
                 )
                 
+                self.logger.debug(f"API service returned unified_track type: {type(unified_track)}")
+                
                 if unified_track:
+                    self.logger.debug(f"unified_track is not None, type: {type(unified_track)}")
+                    self.logger.debug(f"unified_track has __dict__: {hasattr(unified_track, '__dict__')}")
+                    if hasattr(unified_track, '__dict__'):
+                        self.logger.debug(f"unified_track attributes: {list(unified_track.__dict__.keys())}")
+                    
                     # Add recommendation-specific metadata
-                    unified_track.recommendation_score = confidence
-                    unified_track.recommendation_reason = explanation
-                    unified_track.agent_source = source
+                    # Handle both object and dictionary formats for metadata
+                    try:
+                        if hasattr(rec, 'confidence'):  # TrackRecommendation object
+                            self.logger.debug("Setting metadata from TrackRecommendation object")
+                            unified_track.recommendation_score = rec.confidence
+                            unified_track.recommendation_reason = rec.explanation
+                            unified_track.agent_source = rec.source
+                        elif isinstance(rec, dict):  # Dictionary format
+                            self.logger.debug("Setting metadata from dictionary format")
+                            unified_track.recommendation_score = rec.get('confidence', 0.0)
+                            unified_track.recommendation_reason = rec.get('explanation', '')
+                            unified_track.agent_source = rec.get('source', 'unknown')
+                        else:
+                            # Fallback values
+                            self.logger.debug("Setting metadata from fallback values")
+                            unified_track.recommendation_score = confidence
+                            unified_track.recommendation_reason = explanation
+                            unified_track.agent_source = source
+                    except Exception as metadata_error:
+                        self.logger.error(f"Error setting metadata on unified_track: {metadata_error}")
+                        self.logger.error(f"unified_track type: {type(unified_track)}")
+                        self.logger.error(f"Trying to set recommendation_score to: {rec.get('confidence', 0.0) if isinstance(rec, dict) else confidence}")
+                        raise metadata_error
                     
                     unified_tracks.append(unified_track)
                     self.logger.debug(f"Successfully converted: {artist} - {track}")
@@ -462,8 +695,17 @@ class EnhancedRecommendationService:
                     self.logger.debug(f"Failed to get unified track info for {artist} - {track}")
                     
             except Exception as e:
-                artist_name = getattr(rec, 'artist', rec.get('artist', 'unknown')) if hasattr(rec, 'artist') or isinstance(rec, dict) else 'unknown'
-                track_name = getattr(rec, 'title', rec.get('title', rec.get('name', 'unknown'))) if hasattr(rec, 'title') or isinstance(rec, dict) else 'unknown'
+                # Safely extract artist and track names for error logging
+                if hasattr(rec, 'artist'):  # TrackRecommendation object
+                    artist_name = rec.artist
+                    track_name = rec.title
+                elif isinstance(rec, dict):  # Dictionary format
+                    artist_name = rec.get('artist', 'unknown')
+                    track_name = rec.get('title', rec.get('name', 'unknown'))
+                else:
+                    artist_name = 'unknown'
+                    track_name = 'unknown'
+                    
                 self.logger.warning(
                     "Failed to convert recommendation to unified metadata",
                     artist=artist_name,

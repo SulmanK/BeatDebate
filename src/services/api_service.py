@@ -190,7 +190,7 @@ class APIService:
         self,
         query: str,
         limit: int = 20,
-        include_spotify: bool = True
+        include_spotify: bool = False
     ) -> List[UnifiedTrackMetadata]:
         """
         Search for tracks across multiple sources and return unified metadata.
@@ -268,7 +268,8 @@ class APIService:
         self,
         artist: str,
         track: str,
-        include_audio_features: bool = True
+        include_audio_features: bool = True,
+        include_spotify: bool = False
     ) -> Optional[UnifiedTrackMetadata]:
         """
         Get comprehensive track information from multiple sources.
@@ -277,6 +278,7 @@ class APIService:
             artist: Artist name
             track: Track name
             include_audio_features: Whether to fetch Spotify audio features
+            include_spotify: Whether to include Spotify data
             
         Returns:
             Unified track metadata or None
@@ -305,15 +307,14 @@ class APIService:
                         lastfm_data=lastfm_track,
                         tags=lastfm_track.tags,
                         listeners=lastfm_track.listeners,
-                        playcount=lastfm_track.playcount,
-                        summary=lastfm_track.summary
+                        playcount=lastfm_track.playcount
                     )
                     
         except Exception as e:
             self.logger.error("Last.fm track info failed", error=str(e))
         
-        # Enhance with Spotify data
-        if unified_track:
+        # Enhance with Spotify data if requested
+        if unified_track and include_spotify:
             try:
                 spotify_client = await self.get_spotify_client()
                 if spotify_client:
@@ -534,7 +535,7 @@ class APIService:
         return await self.search_unified_tracks(
             query=query,
             limit=limit,
-            include_spotify=True
+            include_spotify=False
         )
     
     async def get_similar_artist_tracks(

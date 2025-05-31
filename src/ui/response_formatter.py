@@ -95,19 +95,17 @@ class ResponseFormatter:
             ""
         ]
         
-        # Add audio preview if available
-        preview_url = rec.get("preview_url")
-        if preview_url:
-            markdown.extend([
-                f"🎧 **[▶️ Preview]({preview_url})**",
-                ""
-            ])
-        
-        # Add thumbs up button (using track ID for identification)
-        track_id = f"{artist}_{title}".replace(" ", "_")
+        # Add Last.fm link for better preview integration
+        lastfm_url = f"https://www.last.fm/music/{artist.replace(' ', '+')}/_/{title.replace(' ', '+')}"
         markdown.extend([
-            "👍 **Like this track?** *(Add to playlist)*",
-            f"*Track ID: {track_id}*",
+            f"🎧 **[Listen on Last.fm]({lastfm_url})**",
+            ""
+        ])
+        
+        # Track ID for reference (useful for research/debugging)
+        track_id = f"{artist}_{title}".replace(" ", "_").replace("(", "").replace(")", "")
+        markdown.extend([
+            f"🔗 **Track ID:** `{track_id}`",
             ""
         ])
         
@@ -120,19 +118,22 @@ class ResponseFormatter:
                 ""
             ])
         
-        # Add genres and moods
+        # Add genres and moods with better formatting
         genres = rec.get("genres", [])
         moods = rec.get("moods", [])
+        tags = rec.get("tags", [])
         
-        if genres or moods:
-            tags = []
+        if genres or moods or tags:
+            tag_elements = []
             if genres:
-                tags.extend([f"🎼 {g}" for g in genres[:3]])
+                tag_elements.extend([f"😌 {g}" for g in genres[:3]])
             if moods:
-                tags.extend([f"😌 {m}" for m in moods[:3]])
+                tag_elements.extend([f"😌 {m}" for m in moods[:3]])
+            if tags:
+                tag_elements.extend([f"😌 {t}" for t in tags[:3]])
             
             markdown.extend([
-                f"**Tags:** {' • '.join(tags)}",
+                f"**Tags:** {' • '.join(tag_elements)}",
                 ""
             ])
         

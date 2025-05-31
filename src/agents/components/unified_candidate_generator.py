@@ -37,9 +37,9 @@ class UnifiedCandidateGenerator:
         self.api_service = api_service
         self.logger = logger.bind(component="UnifiedCandidateGenerator")
         
-        # Default generation parameters - REDUCED for performance
-        self.target_candidates = 60  # Reduced from 100
-        self.final_recommendations = 20
+        # Default generation parameters - INCREASED for better coverage
+        self.target_candidates = 100  # Increased from 60
+        self.final_recommendations = 25  # Increased from 20
         
         # Strategy configurations - REDUCED for performance
         self.strategy_configs = {
@@ -63,7 +63,8 @@ class UnifiedCandidateGenerator:
         entities: Dict[str, Any], 
         intent_analysis: Dict[str, Any],
         agent_type: str = "genre_mood",
-        target_candidates: Optional[int] = None
+        target_candidates: Optional[int] = None,
+        detected_intent: str = None
     ) -> List[Dict[str, Any]]:
         """
         Generate candidate pool using specified strategy.
@@ -73,6 +74,7 @@ class UnifiedCandidateGenerator:
             intent_analysis: Intent analysis from PlannerAgent
             agent_type: "genre_mood" or "discovery" for strategy selection
             target_candidates: Override default target candidate count
+            detected_intent: Specific intent for enhanced candidate generation
             
         Returns:
             List of candidate tracks with source metadata
@@ -83,10 +85,17 @@ class UnifiedCandidateGenerator:
         self.logger.info(
             "Starting unified candidate generation",
             agent_type=agent_type,
-            target_candidates=self.target_candidates
+            target_candidates=self.target_candidates,
+            detected_intent=detected_intent
         )
         
-        # Select strategy based on agent type
+        # 🚀 PHASE 2: Intent-aware candidate generation strategy
+        if detected_intent:
+            return await self._generate_intent_aware_candidates(
+                entities, intent_analysis, detected_intent, agent_type
+            )
+        
+        # Fallback to original strategy selection
         if agent_type == "discovery":
             return await self._generate_discovery_candidates(entities, intent_analysis)
         else:
@@ -116,10 +125,7 @@ class UnifiedCandidateGenerator:
                 return self._finalize_candidates(all_candidates, "genre_mood")
             
             # Source 2: Similar Artists
-            similar_tracks = await self._get_similar_artist_tracks(
-                entities, intent_analysis,
-                limit=strategy['similar_artists']
-            )
+            similar_tracks = await self._get_similar_artist_tracks(entities)
             all_candidates.extend(similar_tracks)
             self.logger.debug(f"Similar artists: {len(similar_tracks)} tracks")
             
@@ -174,6 +180,34 @@ class UnifiedCandidateGenerator:
                 seed_artists=seed_artists,
                 target_genres=target_genres
             )
+            
+            # 🔧 FIX: For artist similarity queries, include target artist's own tracks
+            intent = intent_analysis.get('intent', '')
+            if intent == 'artist_similarity' and seed_artists:
+                self.logger.info(f"Artist similarity detected - including tracks by target artists: {seed_artists}")
+                for artist in seed_artists[:3]:  # Increased from 2 to 3 artists
+                    try:
+                        artist_tracks = await self.api_service.get_artist_top_tracks(
+                            artist=artist,
+                            limit=15  # Increased from 10 for more target artist tracks
+                        )
+                        
+                        for track_metadata in artist_tracks:
+                            track = self._convert_metadata_to_dict(
+                                track_metadata,
+                                source='target_artist_tracks',
+                                source_confidence=0.95,  # High confidence for target artist
+                                target_artist=artist
+                            )
+                            all_candidates.append(track)
+                            
+                        self.logger.info(f"Added {len(artist_tracks)} tracks by target artist: {artist}")
+                        
+                    except Exception as e:
+                        self.logger.warning(
+                            f"Failed to get tracks by target artist '{artist}'", 
+                            error=str(e)
+                        )
             
             # Source 1: Multi-hop Similarity
             similarity_candidates = await self._get_multi_hop_similarity_tracks(
@@ -256,55 +290,42 @@ class UnifiedCandidateGenerator:
     
     async def _get_similar_artist_tracks(
         self, 
-        entities: Dict[str, Any], 
-        intent_analysis: Dict[str, Any],
-        limit: int = 20
+        entities: Dict[str, Any]
     ) -> List[Dict[str, Any]]:
-        """Get tracks from artists similar to those mentioned in entities."""
+        """Generate tracks from artists similar to the target artist."""
         tracks = []
         
         try:
-            artists = self._extract_artists_from_entities(entities)
+            target_artists = self._extract_seed_artists(entities)
             
-            if not artists:
-                artists = self._get_fallback_artists(entities, intent_analysis)
-            
-            # OPTIMIZATION: Limit to max 3 artists and use smaller requests
-            for artist in artists[:3]:  # Reduced from 5 to 3
-                if len(tracks) >= limit:
-                    break
-                    
+            for artist in target_artists[:2]:  # Limit to avoid too many API calls
                 try:
-                    # Use smaller per-artist limit
-                    per_artist_limit = min(8, (limit - len(tracks)))
-                    artist_tracks = await self.api_service.get_artist_top_tracks(
+                    # Use the correct API service method to get similar artist tracks
+                    similar_tracks = await self.api_service.get_similar_artist_tracks(
                         artist=artist,
-                        limit=per_artist_limit
+                        limit=25  # Increased from 15 for more similar artist tracks
                     )
                     
-                    for track_metadata in artist_tracks:
-                        if len(tracks) >= limit:
-                            break
-                            
+                    for track_metadata in similar_tracks:
                         track = self._convert_metadata_to_dict(
                             track_metadata,
-                            source='similar_artists',
-                            source_confidence=0.7,
-                            source_artist=artist
+                            source='similar_artist_tracks',
+                            source_confidence=0.8,  # High confidence for similar artists
+                            similar_to=artist
                         )
                         tracks.append(track)
                             
                 except Exception as e:
                     self.logger.warning(
-                        f"Similar artist search failed for '{artist}'", 
+                        f"Failed to get similar artist tracks for '{artist}'", 
                         error=str(e)
                     )
                     continue
                     
         except Exception as e:
-            self.logger.error("Similar artist tracks failed", error=str(e))
+            self.logger.error("Similar artist tracks generation failed", error=str(e))
         
-        return tracks[:limit]
+        return tracks
     
     async def _get_genre_exploration_tracks(
         self, 
@@ -919,3 +940,210 @@ class UnifiedCandidateGenerator:
     def _get_timestamp(self) -> str:
         """Get current timestamp for metadata."""
         return datetime.now().isoformat() 
+
+    async def _generate_intent_aware_candidates(
+        self, 
+        entities: Dict[str, Any], 
+        intent_analysis: Dict[str, Any],
+        intent: str,
+        agent_type: str
+    ) -> List[Dict[str, Any]]:
+        """
+        Generate candidates using intent-specific strategies from design document.
+        
+        Args:
+            entities: Extracted entities
+            intent_analysis: Intent analysis
+            intent: Detected intent (artist_similarity, discovery, etc.)
+            agent_type: Which agent is requesting candidates
+            
+        Returns:
+            List of intent-optimized candidate tracks
+        """
+        self.logger.info(f"Generating intent-aware candidates for: {intent}")
+        
+        all_candidates = []
+        
+        if intent == 'artist_similarity':
+            # Strategy: Include target artist tracks + similar artists
+            if agent_type == "discovery":
+                # Focus on similar artists and target artist's own tracks
+                all_candidates.extend(
+                    await self._generate_target_artist_tracks(entities)
+                )
+                all_candidates.extend(
+                    await self._get_similar_artist_tracks(entities)
+                )
+            elif agent_type == "genre_mood":
+                # Support with style-consistent tracks
+                all_candidates.extend(
+                    await self._generate_style_consistent_tracks(entities)
+                )
+        
+        elif intent == 'discovery':
+            # Strategy: Focus on serendipitous and underground sources
+            if agent_type == "discovery":
+                all_candidates.extend(
+                    await self._generate_underground_gems(entities)
+                )
+                all_candidates.extend(
+                    await self._generate_serendipitous_discoveries(entities)
+                )
+            elif agent_type == "genre_mood":
+                # Support with genre exploration
+                all_candidates.extend(
+                    await self._generate_genre_exploration_tracks(entities)
+                )
+        
+        elif intent == 'genre_mood':
+            # Strategy: Broad genre-based search with mood filtering
+            if agent_type == "genre_mood":
+                all_candidates.extend(
+                    await self._generate_genre_focused_tracks(entities)
+                )
+                all_candidates.extend(
+                    await self._generate_mood_filtered_tracks(entities)
+                )
+            elif agent_type == "discovery":
+                # Support with genre diversity
+                all_candidates.extend(
+                    await self._generate_genre_diverse_tracks(entities)
+                )
+        
+        elif intent == 'contextual':
+            # Strategy: Audio feature-driven candidate generation
+            if agent_type == "genre_mood":
+                all_candidates.extend(
+                    await self._generate_audio_feature_tracks(entities, intent_analysis)
+                )
+                all_candidates.extend(
+                    await self._generate_functional_music_tracks(entities, intent_analysis)
+                )
+            elif agent_type == "discovery":
+                # Support with activity-specific discovery
+                all_candidates.extend(
+                    await self._generate_activity_discovery_tracks(entities, intent_analysis)
+                )
+        
+        elif intent == 'hybrid':
+            # Strategy: Balanced approach combining similarity and mood
+            if agent_type == "discovery":
+                # For hybrid discovery, we want underground + genre focused
+                all_candidates.extend(
+                    await self._generate_underground_gems(entities)
+                )
+                all_candidates.extend(
+                    await self._generate_genre_focused_discovery(entities)
+                )
+                # Also add similar artist tracks if available
+                similar_tracks = await self._get_similar_artist_tracks(entities)
+                if similar_tracks:
+                    all_candidates.extend(similar_tracks)
+            elif agent_type == "genre_mood":
+                all_candidates.extend(
+                    await self._generate_hybrid_style_tracks(entities)
+                )
+        
+        # Fallback to default generation if no intent-specific candidates
+        if not all_candidates:
+            self.logger.warning(f"No intent-specific candidates for {intent}, falling back to default")
+            if agent_type == "discovery":
+                all_candidates = await self._generate_discovery_candidates(entities, intent_analysis)
+            else:
+                all_candidates = await self._generate_genre_mood_candidates(entities, intent_analysis)
+        
+        # Deduplicate and limit
+        unique_candidates = self._deduplicate_candidates(all_candidates)
+        return unique_candidates[:self.target_candidates]
+    
+    async def _generate_target_artist_tracks(self, entities: Dict[str, Any]) -> List[Dict[str, Any]]:
+        """Generate tracks by the target artist for artist similarity queries."""
+        tracks = []
+        
+        try:
+            target_artists = self._extract_seed_artists(entities)
+            
+            for artist in target_artists[:2]:  # Limit to avoid too many tracks
+                try:
+                    artist_tracks = await self.api_service.get_artist_top_tracks(
+                        artist=artist,
+                        limit=15  # Increased from 10 for more target artist tracks
+                    )
+                    
+                    for track_metadata in artist_tracks:
+                        track = self._convert_metadata_to_dict(
+                            track_metadata,
+                            source='target_artist_tracks',
+                            source_confidence=0.95,
+                            target_artist=artist
+                        )
+                        tracks.append(track)
+                        
+                except Exception as e:
+                    self.logger.warning(
+                        f"Failed to get tracks by target artist '{artist}'", 
+                        error=str(e)
+                    )
+                    continue
+                    
+        except Exception as e:
+            self.logger.error("Target artist tracks generation failed", error=str(e))
+        
+        return tracks[:20]  # Limit to 20 tracks
+    
+    async def _generate_style_consistent_tracks(self, entities: Dict[str, Any]) -> List[Dict[str, Any]]:
+        """Generate tracks that match the style of target artists."""
+        return await self._get_genre_exploration_tracks(entities, {}, limit=20)
+    
+    async def _generate_underground_gems(self, entities: Dict[str, Any]) -> List[Dict[str, Any]]:
+        """Generate underground/hidden gem tracks."""
+        return await self._get_underground_tracks(entities, {}, limit=25)
+    
+    async def _generate_serendipitous_discoveries(self, entities: Dict[str, Any]) -> List[Dict[str, Any]]:
+        """Generate serendipitous discovery tracks."""
+        return await self._get_serendipitous_tracks(entities, {}, limit=20)
+    
+    async def _generate_genre_exploration_tracks(self, entities: Dict[str, Any]) -> List[Dict[str, Any]]:
+        """Generate genre exploration tracks."""
+        return await self._get_genre_exploration_tracks(entities, {}, limit=15)
+    
+    async def _generate_genre_diverse_tracks(self, entities: Dict[str, Any]) -> List[Dict[str, Any]]:
+        """Generate genre diverse tracks for discovery support."""
+        return await self._get_genre_exploration_tracks(entities, {}, limit=10)
+    
+    async def _generate_genre_focused_tracks(self, entities: Dict[str, Any]) -> List[Dict[str, Any]]:
+        """Generate genre-focused tracks."""
+        return await self._get_primary_search_tracks(entities, {}, limit=25)
+    
+    async def _generate_mood_filtered_tracks(self, entities: Dict[str, Any]) -> List[Dict[str, Any]]:
+        """Generate mood-filtered tracks."""
+        return await self._mood_based_serendipity(entities, {}, limit=15)
+    
+    async def _generate_audio_feature_tracks(self, entities: Dict[str, Any], intent_analysis: Dict[str, Any]) -> List[Dict[str, Any]]:
+        """Generate tracks based on audio features for contextual queries."""
+        return await self._get_primary_search_tracks(entities, intent_analysis, limit=20)
+    
+    async def _generate_functional_music_tracks(self, entities: Dict[str, Any], intent_analysis: Dict[str, Any]) -> List[Dict[str, Any]]:
+        """Generate functional music tracks for specific activities."""
+        return await self._get_genre_exploration_tracks(entities, intent_analysis, limit=15)
+    
+    async def _generate_activity_discovery_tracks(self, entities: Dict[str, Any], intent_analysis: Dict[str, Any]) -> List[Dict[str, Any]]:
+        """Generate activity-specific discovery tracks."""
+        return await self._get_underground_tracks(entities, intent_analysis, limit=10)
+    
+    async def _generate_mood_discovery_tracks(self, entities: Dict[str, Any]) -> List[Dict[str, Any]]:
+        """Generate mood-based discovery tracks."""
+        return await self._mood_based_serendipity(entities, {}, limit=15)
+    
+    async def _generate_hybrid_style_tracks(self, entities: Dict[str, Any]) -> List[Dict[str, Any]]:
+        """Generate hybrid style tracks balancing similarity and mood."""
+        # Combine similar artist tracks and genre exploration
+        similar_tracks = await self._get_similar_artist_tracks(entities)
+        genre_tracks = await self._get_genre_exploration_tracks(entities, {}, limit=15)
+        
+        all_tracks = similar_tracks + genre_tracks
+        return self._deduplicate_candidates(all_tracks)[:20]
+
+    async def _generate_genre_focused_discovery(self, entities: Dict[str, Any]) -> List[Dict[str, Any]]:
+        """Generate genre-focused discovery tracks."""
+        return await self._get_genre_exploration_tracks(entities, {}, limit=15) 

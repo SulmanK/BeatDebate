@@ -75,6 +75,28 @@ class CacheManager:
             return [asdict(item) for item in value]
         return value
     
+    def _deserialize_track_metadata(self, data: Dict[str, Any]) -> Any:
+        """Deserialize track metadata from cached dictionary."""
+        try:
+            # Import here to avoid circular imports
+            from ..models.metadata_models import UnifiedTrackMetadata, MetadataSource
+            from datetime import datetime
+            
+            # Handle datetime field
+            if 'last_updated' in data and isinstance(data['last_updated'], str):
+                data['last_updated'] = datetime.fromisoformat(data['last_updated'])
+            
+            # Handle MetadataSource enum
+            if 'source' in data and isinstance(data['source'], str):
+                data['source'] = MetadataSource(data['source'])
+            
+            # Create UnifiedTrackMetadata object
+            return UnifiedTrackMetadata(**data)
+            
+        except Exception as e:
+            logger.warning(f"Failed to deserialize track metadata: {e}")
+            return data  # Return as dict if deserialization fails
+    
     def _generate_key(self, *args, **kwargs) -> str:
         """Generate cache key from arguments."""
         key_data = {
@@ -356,7 +378,13 @@ class CacheManager:
     def get_track_metadata(self, artist: str, track: str) -> Any:
         """Get cached track metadata."""
         key = self._generate_key("track", artist.lower(), track.lower())
-        return self.get("tracks", key)
+        cached_data = self.get("tracks", key)
+        
+        # If we got cached data and it's a dictionary, try to deserialize it
+        if cached_data is not None and isinstance(cached_data, dict):
+            return self._deserialize_track_metadata(cached_data)
+        
+        return cached_data
     
     def cache_strategy(
         self, 

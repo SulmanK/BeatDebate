@@ -241,13 +241,18 @@ class SystemConfig(BaseModel):
 
 class QueryIntent(Enum):
     """Primary intent types for music queries."""
-    ARTIST_SIMILARITY = "artist_similarity"      # "Music like X"
-    GENRE_EXPLORATION = "genre_exploration"      # "I want jazz music"
-    MOOD_MATCHING = "mood_matching"              # "Happy music for workout"
-    ACTIVITY_CONTEXT = "activity_context"        # "Music for studying"
-    DISCOVERY = "discovery"                      # "Something new and different"
-    PLAYLIST_BUILDING = "playlist_building"      # "Songs for my road trip"
-    SPECIFIC_REQUEST = "specific_request"        # "Play Bohemian Rhapsody"
+    ARTIST_SIMILARITY = "artist_similarity"      # "Music like X" - focus on similarity
+    DISCOVERY = "discovery"                      # "Something new and different" - focus on novelty
+    GENRE_MOOD = "genre_mood"                   # "Upbeat electronic music" - focus on style/vibe
+    CONTEXTUAL = "contextual"                   # "Music for studying" - focus on functional fit
+    HYBRID = "hybrid"                           # "Chill songs like Bon Iver" - mixed intents
+    
+    # Legacy compatibility (can be removed after migration)
+    GENRE_EXPLORATION = "genre_exploration"      # Maps to GENRE_MOOD
+    MOOD_MATCHING = "mood_matching"              # Maps to GENRE_MOOD  
+    ACTIVITY_CONTEXT = "activity_context"        # Maps to CONTEXTUAL
+    PLAYLIST_BUILDING = "playlist_building"      # Maps to CONTEXTUAL
+    SPECIFIC_REQUEST = "specific_request"        # Maps to ARTIST_SIMILARITY
 
 
 class SimilarityType(Enum):

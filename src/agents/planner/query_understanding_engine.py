@@ -65,9 +65,31 @@ class QueryUnderstandingEngine:
         # Define system prompt for LLM-based understanding
         self.system_prompt = """You are a music query understanding assistant. Analyze user queries about music recommendations and extract structured information.
 
+CRITICAL: Classify queries into these specific intent types based on the design document:
+
+1. ARTIST_SIMILARITY ("Music like [Artist]", "Similar to [Artist]")
+   - Focus on finding artists/tracks that sound similar
+   - Extract artist names EXACTLY as written (e.g., "Mk.gee", "BROCKHAMPTON", "!!!")
+
+2. DISCOVERY ("Find me underground indie rock", "Something new and different")
+   - Focus on discovering truly new/unknown music
+   - Emphasis on novelty and underground tracks
+
+3. GENRE_MOOD ("Upbeat electronic music", "Sad indie songs")
+   - Focus on specific vibes, genres, or moods
+   - No specific artist reference, just style/feel
+
+4. CONTEXTUAL ("Music for studying", "Workout playlist", "Road trip songs")
+   - Focus on functional music for specific activities
+   - Context-driven recommendations
+
+5. HYBRID ("Chill songs like Bon Iver", "Upbeat music similar to Daft Punk")
+   - Combines artist similarity with mood/genre requirements
+   - Both artist reference AND style/context requirements
+
 Return a JSON object with this exact structure:
 {
-    "intent": "discovery|mood_based|activity_based|genre_specific|similarity",
+    "intent": "artist_similarity|discovery|genre_mood|contextual|hybrid",
     "musical_entities": {
         "artists": ["artist1", "artist2"],
         "genres": ["genre1", "genre2"], 
@@ -80,9 +102,14 @@ Return a JSON object with this exact structure:
     "confidence": 0.8
 }
 
-Be specific about genres (use specific subgenres when possible).
-Extract moods from emotional language in the query.
-Identify context factors like activities, time of day, social situations."""
+EXAMPLES:
+- "Music like Mk.gee" → intent: "artist_similarity", artists: ["Mk.gee"]
+- "Find underground electronic music" → intent: "discovery", genres: ["electronic"]
+- "Happy music for working out" → intent: "contextual", moods: ["happy"], context_factors: ["workout"]
+- "Chill songs like Bon Iver" → intent: "hybrid", artists: ["Bon Iver"], moods: ["chill"]
+- "Upbeat electronic music" → intent: "genre_mood", genres: ["electronic"], moods: ["upbeat"]
+
+Be specific about genres and extract moods from emotional language."""
     
     async def understand_query(
         self, 
@@ -102,15 +129,17 @@ Identify context factors like activities, time of day, social situations."""
         self.logger.info("Starting query understanding", query_length=len(query))
         
         try:
-            # Phase 1: Pattern-based analysis using shared utilities
+            # Phase 1: Pattern-based analysis using shared utilities for fallback
             pattern_analysis = self._pattern_based_analysis(query)
             
-            # Phase 2: LLM-based understanding for complex queries
-            if pattern_analysis['complexity_level'] in ['medium', 'complex']:
+            # Phase 2: LLM-based understanding for ALL queries (not just complex)
+            # LLM is much better at entity extraction, especially for artist names
+            try:
                 llm_analysis = await self._llm_based_understanding(query)
-                # Merge pattern and LLM analysis
-                final_analysis = self._merge_analyses(pattern_analysis, llm_analysis)
-            else:
+                # Merge pattern and LLM analysis, prioritizing LLM for entities
+                final_analysis = self._merge_analyses(pattern_analysis, llm_analysis, prioritize_llm_entities=True)
+            except Exception as e:
+                self.logger.warning("LLM understanding failed, using pattern analysis only", error=str(e))
                 final_analysis = pattern_analysis
             
             # Phase 3: Validate and enhance with shared utilities
@@ -166,6 +195,11 @@ Identify context factors like activities, time of day, social situations."""
             'genre_hints': comprehensive_analysis['genre_hints']
         }
         
+        # 🔧 SET FLAG: Track if pattern analysis detected hybrid intent
+        self._pattern_detected_hybrid = (comprehensive_analysis['intent_analysis']['primary_intent'] == 'hybrid')
+        if self._pattern_detected_hybrid:
+            self.logger.info(f"🔧 FLAG SET: Pattern analysis detected hybrid intent for query: '{query}'")
+        
         return pattern_analysis
     
     async def _llm_based_understanding(self, query: str) -> Dict[str, Any]:
@@ -199,7 +233,7 @@ Remember to return ONLY the JSON object with no additional text."""
             raise e
     
     def _merge_analyses(
-        self, pattern_analysis: Dict[str, Any], llm_analysis: Dict[str, Any]
+        self, pattern_analysis: Dict[str, Any], llm_analysis: Dict[str, Any], prioritize_llm_entities: bool = False
     ) -> Dict[str, Any]:
         """Merge pattern-based and LLM-based analyses."""
         merged = pattern_analysis.copy()
@@ -213,6 +247,9 @@ Remember to return ONLY the JSON object with no additional text."""
         # Merge musical entities
         llm_entities = llm_analysis.get('musical_entities', {})
         pattern_entities = merged.get('musical_entities', {})
+        
+        if prioritize_llm_entities:
+            pattern_entities = llm_entities.copy()
         
         for entity_type in ['artists', 'genres', 'tracks', 'moods']:
             if entity_type in llm_entities:
@@ -254,16 +291,27 @@ Remember to return ONLY the JSON object with no additional text."""
             try:
                 # Map common intent values to valid enum values
                 intent_mapping = {
-                    'discovery': 'DISCOVERY',
-                    'similarity': 'DISCOVERY',  # Map similarity to discovery for now
-                    'mood_based': 'MOOD_BASED',
-                    'activity_based': 'ACTIVITY_BASED',
-                    'genre_specific': 'GENRE_BASED'
+                    'discovery': 'discovery',
+                    'similarity': 'artist_similarity',
+                    'artist_similarity': 'artist_similarity',
+                    'mood_based': 'genre_mood',
+                    'activity_based': 'contextual',
+                    'genre_specific': 'genre_mood',
+                    'contextual': 'contextual',  # 🔧 FIX: Add missing contextual mapping
+                    'hybrid': 'hybrid'  # ✅ FIXED: Use lowercase to match enum value
                 }
-                mapped_intent = intent_mapping.get(intent_str.lower(), 'DISCOVERY')
+                
+                # 🔧 FIX: Override LLM intent if pattern analysis detected hybrid
+                if hasattr(self, '_pattern_detected_hybrid') and self._pattern_detected_hybrid:
+                    self.logger.info(f"🔧 OVERRIDE: Pattern analysis detected hybrid, overriding LLM intent '{intent_str}' -> 'hybrid'")
+                    intent_str = 'hybrid'
+                
+                mapped_intent = intent_mapping.get(intent_str.lower(), 'discovery')  # 🔧 FIX: Fallback to 'discovery' not 'DISCOVERY'
+                self.logger.debug(f"🔧 INTENT MAPPING: '{intent_str}' -> '{mapped_intent}'")
                 intent = QueryIntent(mapped_intent)
-            except ValueError:
-                self.logger.warning("Invalid intent", intent=intent_str)
+                self.logger.debug(f"🔧 INTENT CREATED: {intent} (value: {intent.value})")
+            except ValueError as e:
+                self.logger.warning(f"Invalid intent: {intent_str}, error: {e}")
                 intent = QueryIntent.DISCOVERY
             
             # Extract similarity type if present
@@ -273,7 +321,7 @@ Remember to return ONLY the JSON object with no additional text."""
                     # Map similarity types to valid enum values
                     similarity_mapping = {
                         'exact': 'STYLISTIC',
-                        'moderate': 'GENRE', 
+                        'moderate': 'STYLISTIC',  # ✅ FIXED! Artist similarity should be stylistic
                         'loose': 'MOOD'
                     }
                     similarity_str = analysis.get('similarity_type')
@@ -310,6 +358,23 @@ Remember to return ONLY the JSON object with no additional text."""
                     artists.extend(extract_names(artists_data.get('similar_to', [])))
                 elif isinstance(artists_data, list):
                     artists.extend(extract_names(artists_data))
+            
+            # ✅ FORCE ARTIST_SIMILARITY intent when artists found with similarity indicators
+            if artists and any(phrase in original_query.lower() for phrase in ['like', 'similar to', 'sounds like', 'reminds me of']):
+                intent = QueryIntent.ARTIST_SIMILARITY
+                # Set default similarity type for artist similarity if not already set
+                if similarity_type is None:
+                    similarity_type = SimilarityType.STYLISTIC
+                self.logger.info("Detected artist similarity query, forcing ARTIST_SIMILARITY intent", artists=artists)
+            
+            # 🔧 NEW: Detect hybrid sub-types for better scoring
+            hybrid_subtype = None
+            if intent == QueryIntent.HYBRID:
+                hybrid_subtype = self.query_utils.detect_hybrid_subtype(
+                    original_query, 
+                    analysis.get('musical_entities', {})
+                )
+                self.logger.info(f"🔧 HYBRID SUB-TYPE DETECTED: {hybrid_subtype} for query: '{original_query}'")
             
             # Extract genres from musical entities
             genres = []
@@ -370,7 +435,8 @@ Remember to return ONLY the JSON object with no additional text."""
                 similarity_type=similarity_type,
                 original_query=original_query,
                 normalized_query=original_query.lower().strip(),
-                reasoning=f"Analysis completed with {confidence:.1%} confidence"
+                reasoning=f"Analysis completed with {confidence:.1%} confidence" + 
+                         (f" | Hybrid sub-type: {hybrid_subtype}" if hybrid_subtype else "")
             )
             
             return understanding

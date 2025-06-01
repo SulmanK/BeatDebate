@@ -91,6 +91,9 @@ class MusicRecommenderState(BaseModel):
     session_id: Annotated[Optional[str], keep_first] = Field(default=None, description="Unique session identifier")
     confidence: Annotated[Optional[float], keep_first] = Field(default=None, description="Overall confidence in query understanding")
 
+    # NEW: For intent override system
+    context_override: Annotated[Optional[Dict[str, Any]], keep_first] = Field(default=None, description="Context override for intent system")
+
 
 class AgentStrategy(BaseModel):
     """Strategy object passed between agents"""

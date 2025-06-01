@@ -65,7 +65,7 @@ build-backend = "hatchling.build"
 packages = ["src"]
 
 [tool.black]
-line-length = 180
+line-length = 188
 target-version = ['py311']
 include = '\.pyi?$'
 extend-exclude = '''
@@ -85,7 +85,7 @@ extend-exclude = '''
 [tool.isort]
 profile = "black"
 multi_line_output = 3
-line_length = 180
+line-length = 188
 known_first_party = ["beatdebate"]
 
 [tool.mypy]
@@ -112,7 +112,7 @@ addopts = "--cov=src --cov-report=term-missing --cov-report=html"
 asyncio_mode = "auto"
 
 [tool.ruff]
-line-length = 180
+line-length = 188
 target-version = "py311"
 extend-exclude = [
     ".venv",

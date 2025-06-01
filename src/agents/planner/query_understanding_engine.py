@@ -2,41 +2,32 @@
 Query Understanding Engine for Planner Agent
 
 Moved from root agents directory and simplified to use shared components.
-Eliminates duplicate LLM and JSON parsing logic.
+Handles query analysis, entity extraction, and intent classification.
 """
 
-import json
 from typing import Dict, Any, Optional
 import structlog
 
-from ...models.agent_models import MusicRecommenderState, QueryIntent, SimilarityType, QueryUnderstanding
-from ..components.llm_utils import LLMUtils
-from ..components.entity_extraction_utils import EntityExtractionUtils
-from ..components.query_analysis_utils import QueryAnalysisUtils
+from ...models.agent_models import QueryIntent, SimilarityType, QueryUnderstanding
 
 logger = structlog.get_logger(__name__)
 
 
 class QueryUnderstandingEngine:
     """
-    Simplified query understanding engine using shared components.
+    Handles query understanding with both pattern-based and LLM-based analysis.
     
-    Eliminates duplicate LLM calling and JSON parsing patterns by using:
-    - LLMUtils for all LLM interactions
-    - EntityExtractionUtils for entity extraction
-    - QueryAnalysisUtils for query analysis
+    Uses shared components for entity extraction, query analysis, and LLM interactions.
     """
     
     def __init__(self, llm_client, rate_limiter=None):
-        """
-        Initialize query understanding engine.
-        
-        Args:
-            llm_client: LLM client for query analysis
-            rate_limiter: Rate limiter for LLM API calls
-        """
+        """Initialize query understanding engine with shared components."""
+        self.logger = logger
         self.llm_client = llm_client
-        self.logger = logger.bind(component="QueryUnderstandingEngine")
+        self.rate_limiter = rate_limiter
+        
+        # Build comprehensive system prompt for query understanding
+        self.system_prompt = self._build_system_prompt()
         
         # Initialize shared LLM utilities with rate limiter
         try:
@@ -62,8 +53,11 @@ class QueryUnderstandingEngine:
             from components.query_analysis_utils import QueryAnalysisUtils
             self.query_utils = QueryAnalysisUtils()
         
-        # Define system prompt for LLM-based understanding
-        self.system_prompt = """You are a music query understanding assistant. Analyze user queries about music recommendations and extract structured information.
+        self.logger.info("Query Understanding Engine initialized with shared components")
+    
+    def _build_system_prompt(self) -> str:
+        """Build comprehensive system prompt for query understanding."""
+        return """You are a music query understanding assistant. Analyze user queries about music recommendations and extract structured information.
 
 CRITICAL: Classify queries into these specific intent types based on the design document:
 
@@ -218,6 +212,9 @@ Remember to return ONLY the JSON object with no additional text."""
                 max_retries=2
             )
             
+            # 🔧 DEBUG: Log what LLM actually returned
+            self.logger.info(f"🔧 LLM RAW RESPONSE: {llm_data}")
+            
             # Validate JSON structure using shared utilities
             required_keys = ['intent', 'musical_entities', 'context_factors', 'complexity_level']
             optional_keys = ['similarity_type', 'confidence']
@@ -225,6 +222,9 @@ Remember to return ONLY the JSON object with no additional text."""
             validated_data = self.llm_utils.validate_json_structure(
                 llm_data, required_keys, optional_keys
             )
+            
+            # 🔧 DEBUG: Log validated data  
+            self.logger.info(f"🔧 LLM VALIDATED RESPONSE: {validated_data}")
             
             return validated_data
             
@@ -238,6 +238,11 @@ Remember to return ONLY the JSON object with no additional text."""
         """Merge pattern-based and LLM-based analyses."""
         merged = pattern_analysis.copy()
         
+        # 🔧 DEBUG: Log what we're merging
+        self.logger.info(f"🔧 MERGE DEBUG: prioritize_llm_entities={prioritize_llm_entities}")
+        self.logger.info(f"🔧 PATTERN ENTITIES: {pattern_analysis.get('musical_entities', {})}")
+        self.logger.info(f"🔧 LLM ENTITIES: {llm_analysis.get('musical_entities', {})}")
+        
         # Use LLM intent if it has higher confidence
         llm_confidence = llm_analysis.get('confidence', 0.5)
         if llm_confidence > merged.get('confidence', 0.0):
@@ -249,20 +254,58 @@ Remember to return ONLY the JSON object with no additional text."""
         pattern_entities = merged.get('musical_entities', {})
         
         if prioritize_llm_entities:
-            pattern_entities = llm_entities.copy()
-        
-        for entity_type in ['artists', 'genres', 'tracks', 'moods']:
-            if entity_type in llm_entities:
-                if entity_type not in pattern_entities:
-                    pattern_entities[entity_type] = {}
-                
-                for category in ['primary', 'secondary', 'similar_to']:
-                    if category in llm_entities[entity_type]:
-                        # Combine and deduplicate
-                        existing = pattern_entities[entity_type].get(category, [])
-                        new_items = llm_entities[entity_type][category]
-                        combined = list(dict.fromkeys(existing + new_items))
-                        pattern_entities[entity_type][category] = combined
+            # 🔧 FIX: When prioritizing LLM entities, convert them to the expected structure
+            converted_entities = {}
+            for entity_type in ['artists', 'genres', 'tracks', 'moods']:
+                if entity_type in llm_entities:
+                    llm_data = llm_entities[entity_type]
+                    if isinstance(llm_data, list):
+                        # Convert simple list to structured format
+                        converted_entities[entity_type] = {
+                            'primary': [{'name': item, 'confidence': 0.9} if isinstance(item, str) else item 
+                                        for item in llm_data],
+                            'secondary': [],
+                            'similar_to': []
+                        }
+                    elif isinstance(llm_data, dict):
+                        # Already in structured format
+                        converted_entities[entity_type] = llm_data
+                    else:
+                        # Fallback for other types
+                        converted_entities[entity_type] = {
+                            'primary': [{'name': str(llm_data), 'confidence': 0.9}],
+                            'secondary': [],
+                            'similar_to': []
+                        }
+                else:
+                    # Keep existing pattern entities for this type
+                    if entity_type in pattern_entities:
+                        converted_entities[entity_type] = pattern_entities[entity_type]
+            
+            merged['musical_entities'] = converted_entities
+            self.logger.info(f"🔧 CONVERTED LLM entities to structured format: {converted_entities}")
+        else:
+            # Only combine when NOT prioritizing LLM entities
+            for entity_type in ['artists', 'genres', 'tracks', 'moods']:
+                if entity_type in llm_entities:
+                    if entity_type not in pattern_entities:
+                        pattern_entities[entity_type] = {'primary': [], 'secondary': [], 'similar_to': []}
+                    
+                    llm_data = llm_entities[entity_type]
+                    if isinstance(llm_data, list):
+                        # Convert simple list items to structured format
+                        for item in llm_data:
+                            structured_item = {'name': item, 'confidence': 0.9} if isinstance(item, str) else item
+                            pattern_entities[entity_type]['primary'].append(structured_item)
+                    elif isinstance(llm_data, dict):
+                        # Merge structured data
+                        for category in ['primary', 'secondary', 'similar_to']:
+                            if category in llm_data:
+                                existing = pattern_entities[entity_type].get(category, [])
+                                new_items = llm_data[category]
+                                combined = existing + new_items
+                                pattern_entities[entity_type][category] = combined
+            merged['musical_entities'] = pattern_entities
         
         # Merge context factors
         llm_context = llm_analysis.get('context_factors', [])
@@ -435,8 +478,8 @@ Remember to return ONLY the JSON object with no additional text."""
                 similarity_type=similarity_type,
                 original_query=original_query,
                 normalized_query=original_query.lower().strip(),
-                reasoning=f"Analysis completed with {confidence:.1%} confidence" + 
-                         (f" | Hybrid sub-type: {hybrid_subtype}" if hybrid_subtype else "")
+                reasoning=(f"Analysis completed with {confidence:.1%} confidence" + 
+                           (f" | Hybrid sub-type: {hybrid_subtype}" if hybrid_subtype else ""))
             )
             
             return understanding

@@ -493,12 +493,12 @@ class APIService:
                 unified_artist = UnifiedArtistMetadata(
                     name=artist_info.name,
                     source=MetadataSource.LASTFM,
-                    lastfm_data=artist_info,
                     tags=artist_info.tags,
                     similar_artists=artist_info.similar_artists,
                     listeners=artist_info.listeners,
                     playcount=artist_info.playcount,
-                    bio=artist_info.bio
+                    bio=artist_info.bio,
+                    source_data={"lastfm": artist_info.__dict__}
                 )
                 
                 # Get top tracks if requested
@@ -511,7 +511,7 @@ class APIService:
                 return unified_artist
                 
         except Exception as e:
-            self.logger.error("Artist info failed", artist=artist, error=str(e))
+            self.logger.error(f"Artist info failed for {artist}: {e}")
             return None
     
     # Additional methods expected by unified candidate generator
@@ -679,6 +679,298 @@ class APIService:
                 artist=artist, 
                 error=str(e)
             )
+            return []
+    
+    async def check_artist_genre_match(
+        self,
+        artist: str,
+        target_genre: str,
+        include_related_genres: bool = True
+    ) -> Dict[str, Any]:
+        """
+        Check if an artist matches a specific genre by looking up their metadata.
+        
+        Args:
+            artist: Artist name
+            target_genre: Genre to check against (e.g., "r&b", "jazz", "rock")
+            include_related_genres: Whether to include related/synonym genres
+            
+        Returns:
+            Dict with match info: {
+                'matches': bool,
+                'confidence': float,
+                'matched_tags': List[str],
+                'artist_tags': List[str],
+                'match_type': str  # 'direct', 'related', 'none'
+            }
+        """
+        try:
+            # Get artist information from Last.fm
+            artist_info = await self.get_artist_info(artist, include_top_tracks=False)
+            
+            if not artist_info or not artist_info.tags:
+                self.logger.debug(f"No tags found for artist: {artist}")
+                return {
+                    'matches': False,
+                    'confidence': 0.0,
+                    'matched_tags': [],
+                    'artist_tags': [],
+                    'match_type': 'none'
+                }
+            
+            # Normalize target genre
+            target_genre_lower = target_genre.lower().strip()
+            artist_tags_lower = [tag.lower() for tag in artist_info.tags]
+            
+            # Create genre mappings for related genres
+            genre_mappings = self._get_genre_mappings()
+            
+            # Check for direct match first
+            if target_genre_lower in artist_tags_lower:
+                return {
+                    'matches': True,
+                    'confidence': 1.0,
+                    'matched_tags': [target_genre_lower],
+                    'artist_tags': artist_info.tags,
+                    'match_type': 'direct'
+                }
+            
+            # Check for related genres if enabled
+            if include_related_genres and target_genre_lower in genre_mappings:
+                related_genres = genre_mappings[target_genre_lower]
+                matched_related = []
+                
+                for related_genre in related_genres:
+                    if related_genre in artist_tags_lower:
+                        matched_related.append(related_genre)
+                
+                if matched_related:
+                    # Calculate confidence based on how many related genres match
+                    confidence = min(0.9, len(matched_related) * 0.3)
+                    return {
+                        'matches': True,
+                        'confidence': confidence,
+                        'matched_tags': matched_related,
+                        'artist_tags': artist_info.tags,
+                        'match_type': 'related'
+                    }
+            
+            # No match found
+            return {
+                'matches': False,
+                'confidence': 0.0,
+                'matched_tags': [],
+                'artist_tags': artist_info.tags,
+                'match_type': 'none'
+            }
+            
+        except Exception as e:
+            self.logger.error(f"Artist genre check failed for {artist}: {e}")
+            return {
+                'matches': False,
+                'confidence': 0.0,
+                'matched_tags': [],
+                'artist_tags': [],
+                'match_type': 'error'
+            }
+    
+    async def check_track_genre_match(
+        self,
+        artist: str,
+        track: str,
+        target_genre: str,
+        include_related_genres: bool = True
+    ) -> Dict[str, Any]:
+        """
+        Check if a track matches a specific genre by looking up track and artist metadata.
+        
+        Args:
+            artist: Artist name
+            track: Track name
+            target_genre: Genre to check against
+            include_related_genres: Whether to include related/synonym genres
+            
+        Returns:
+            Dict with match info: {
+                'matches': bool,
+                'confidence': float,
+                'matched_tags': List[str],
+                'track_tags': List[str],
+                'artist_match': Dict[str, Any],
+                'match_type': str
+            }
+        """
+        try:
+            # Check both track-specific tags and artist genre
+            track_info = await self.get_unified_track_info(artist, track, include_spotify=False)
+            artist_match = await self.check_artist_genre_match(artist, target_genre, include_related_genres)
+            
+            track_tags = []
+            track_match_result = {
+                'matches': False,
+                'confidence': 0.0,
+                'matched_tags': [],
+                'track_tags': track_tags,
+                'artist_match': artist_match,
+                'match_type': 'none'
+            }
+            
+            # Get track tags if available
+            if track_info and track_info.tags:
+                track_tags = track_info.tags
+                track_match_result['track_tags'] = track_tags
+                
+                # Check track tags for genre match
+                target_genre_lower = target_genre.lower().strip()
+                track_tags_lower = [tag.lower() for tag in track_tags]
+                
+                # Direct match in track tags
+                if target_genre_lower in track_tags_lower:
+                    track_match_result.update({
+                        'matches': True,
+                        'confidence': 1.0,
+                        'matched_tags': [target_genre_lower],
+                        'match_type': 'direct_track'
+                    })
+                    return track_match_result
+                
+                # Related genre match in track tags
+                if include_related_genres:
+                    genre_mappings = self._get_genre_mappings()
+                    if target_genre_lower in genre_mappings:
+                        related_genres = genre_mappings[target_genre_lower]
+                        matched_related = []
+                        
+                        for related_genre in related_genres:
+                            if related_genre in track_tags_lower:
+                                matched_related.append(related_genre)
+                        
+                        if matched_related:
+                            confidence = min(0.9, len(matched_related) * 0.3)
+                            track_match_result.update({
+                                'matches': True,
+                                'confidence': confidence,
+                                'matched_tags': matched_related,
+                                'match_type': 'related_track'
+                            })
+                            return track_match_result
+            
+            # If track doesn't have genre info, fall back to artist genre
+            if artist_match['matches']:
+                track_match_result.update({
+                    'matches': True,
+                    'confidence': artist_match['confidence'] * 0.8,  # Slightly lower confidence
+                    'matched_tags': artist_match['matched_tags'],
+                    'match_type': f"artist_{artist_match['match_type']}"
+                })
+                return track_match_result
+            
+            # No match found
+            return track_match_result
+            
+        except Exception as e:
+            self.logger.error(f"Track genre check failed for {artist} - {track}: {e}")
+            return {
+                'matches': False,
+                'confidence': 0.0,
+                'matched_tags': [],
+                'track_tags': [],
+                'artist_match': {'matches': False, 'confidence': 0.0},
+                'match_type': 'error'
+            }
+    
+    def _get_genre_mappings(self) -> Dict[str, List[str]]:
+        """
+        Get genre mappings for related genre detection.
+        
+        Returns:
+            Dict mapping primary genres to related genres
+        """
+        return {
+            'r&b': [
+                'rnb', 'rhythm and blues', 'soul', 'neo-soul', 'contemporary r&b',
+                'motown', 'funk', 'urban', 'smooth r&b', 'r&b soul'
+            ],
+            'jazz': [
+                'bebop', 'swing', 'cool jazz', 'fusion', 'smooth jazz',
+                'jazz fusion', 'contemporary jazz', 'acid jazz'
+            ],
+            'rock': [
+                'classic rock', 'alternative rock', 'indie rock', 'hard rock',
+                'soft rock', 'progressive rock', 'art rock', 'garage rock'
+            ],
+            'electronic': [
+                'edm', 'techno', 'house', 'ambient', 'electronica',
+                'synth', 'synthwave', 'electronic music', 'dance'
+            ],
+            'hip hop': [
+                'hip-hop', 'rap', 'trap', 'underground hip hop', 'conscious hip hop',
+                'old school hip hop', 'east coast hip hop', 'west coast hip hop'
+            ],
+            'pop': [
+                'pop music', 'mainstream pop', 'indie pop', 'electro pop',
+                'synth pop', 'dance pop', 'alternative pop'
+            ],
+            'indie': [
+                'indie rock', 'indie pop', 'indie folk', 'alternative',
+                'independent', 'lo-fi', 'bedroom pop'
+            ],
+            'folk': [
+                'folk music', 'indie folk', 'contemporary folk', 'acoustic',
+                'singer-songwriter', 'americana', 'country folk'
+            ],
+            'metal': [
+                'heavy metal', 'death metal', 'black metal', 'thrash metal',
+                'progressive metal', 'power metal', 'doom metal'
+            ],
+            'country': [
+                'country music', 'modern country', 'classic country',
+                'country rock', 'americana', 'bluegrass'
+            ]
+        }
+    
+    async def get_artist_primary_genres(
+        self,
+        artist: str,
+        max_genres: int = 3
+    ) -> List[str]:
+        """
+        Get the primary genres for an artist based on their Last.fm tags.
+        
+        Args:
+            artist: Artist name
+            max_genres: Maximum number of genres to return
+            
+        Returns:
+            List of primary genres for the artist
+        """
+        try:
+            artist_info = await self.get_artist_info(artist, include_top_tracks=False)
+            
+            if not artist_info or not artist_info.tags:
+                return []
+            
+            # Filter for genre-like tags (exclude non-genre descriptors)
+            genre_keywords = [
+                'rock', 'pop', 'jazz', 'blues', 'country', 'folk', 'metal', 
+                'electronic', 'hip hop', 'hip-hop', 'rap', 'r&b', 'rnb', 
+                'soul', 'funk', 'reggae', 'punk', 'indie', 'alternative',
+                'classical', 'ambient', 'techno', 'house', 'dance'
+            ]
+            
+            genre_tags = []
+            for tag in artist_info.tags[:10]:  # Check top 10 tags
+                tag_lower = tag.lower()
+                if any(genre_keyword in tag_lower for genre_keyword in genre_keywords):
+                    genre_tags.append(tag)
+                    
+                if len(genre_tags) >= max_genres:
+                    break
+            
+            return genre_tags
+            
+        except Exception as e:
+            self.logger.error(f"Failed to get primary genres for {artist}: {e}")
             return []
     
     async def close(self):

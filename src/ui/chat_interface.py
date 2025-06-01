@@ -235,7 +235,7 @@ class BeatDebateChatInterface:
         
         # Container with scrolling for all tracks
         player_html.append("""
-        <div style="
+            <div style="
             max-height: 400px;
             overflow-y: auto;
             border-radius: 0 0 12px 12px;
@@ -576,6 +576,17 @@ class BeatDebateChatInterface:
                         with gr.Column(scale=1):
                             gr.Markdown("**📍 Contextual**")
                             for example in QUERY_EXAMPLES["Contextual"]:
+                                btn = gr.Button(
+                                    example,
+                                    elem_classes=["example-chip"],
+                                    size="sm",
+                                    variant="secondary"
+                                )
+                                example_buttons.append((btn, example))
+                
+                        with gr.Column(scale=1):
+                            gr.Markdown("**📍 Hybrid**")
+                            for example in QUERY_EXAMPLES["Hybrid"]:
                                 btn = gr.Button(
                                     example,
                                     elem_classes=["example-chip"],

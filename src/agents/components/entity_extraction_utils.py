@@ -93,7 +93,7 @@ class EntityExtractionUtils:
         # Pattern 2: "like [artist]" or "similar to [artist]"
         similar_pattern = (r'\b(?:like|similar to|sounds like|reminds me of)\s+'
                           r'([A-Za-z0-9\s&\-\'\.]+?)'
-                          r'(?:\s*$|,|\?|!|\s+(?:but|music|songs?|tracks?|bands?|artists?|with|and|or))')
+                          r'(?:\s*$|,|\?|!|\s+(?:but|music|songs?|tracks?|bands?|artists?|with|and|or|that|who|which))')
         similar_matches = re.findall(similar_pattern, text, re.IGNORECASE)
         for match in similar_matches:
             artist = self._clean_artist_name(match)

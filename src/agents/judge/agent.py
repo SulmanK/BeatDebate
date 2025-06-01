@@ -17,7 +17,6 @@ from ...services.api_service import APIService
 from ...services.metadata_service import MetadataService
 from ..base_agent import BaseAgent
 from ..components import QualityScorer
-from ..components.llm_utils import LLMUtils
 from .ranking_logic import RankingLogic
 from ..components.query_analysis_utils import QueryAnalysisUtils
 
@@ -66,7 +65,7 @@ class JudgeAgent(BaseAgent):
             rate_limiter=rate_limiter
         )
         
-        # Shared components (LLMUtils now initialized in parent with rate limiter)
+        # Shared components initialized in parent with rate limiter
         self.quality_scorer = QualityScorer()
         
         # Configuration
@@ -74,7 +73,11 @@ class JudgeAgent(BaseAgent):
         self.diversity_targets = {
             'max_per_artist': 2,
             'min_genres': 3,
-            'source_distribution': {'genre_mood_agent': 0.4, 'discovery_agent': 0.4, 'planner_agent': 0.2}
+            'source_distribution': {
+                'genre_mood_agent': 0.4, 
+                'discovery_agent': 0.4, 
+                'planner_agent': 0.2
+            }
         }
         
         # Initialize shared components
@@ -207,10 +210,9 @@ class JudgeAgent(BaseAgent):
         """Score all candidates with contextual relevance."""
         scored_candidates = []
         
-        # Extract context from state
+        # Collect context from state
         entities = state.entities or {}
         intent_analysis = state.intent_analysis or {}
-        query_understanding = state.query_understanding
         
         # 🔧 FIX: Get intent from state and detect hybrid sub-types
         intent = 'balanced'  # default
@@ -368,7 +370,7 @@ class JudgeAgent(BaseAgent):
                 
                 if target_artists and candidate.artist in target_artists:
                     if candidate.artist == 'Mk.gee':
-                        self.logger.info(f"🎯 DEBUG Judge: Giving 0.95 intent alignment to Mk.gee track!")
+                        self.logger.info(f"🎯 DEBUG Judge: Giving 0.95 intent alignment to Mk.gee track: {candidate.title}!")
                     return 0.95  # Very high score for target artist tracks
                 elif (hasattr(candidate, 'explanation') and candidate.explanation 
                       and 'similar' in candidate.explanation.lower()):
@@ -482,12 +484,102 @@ class JudgeAgent(BaseAgent):
             intent = state.intent_analysis['intent']
             self.logger.debug(f"🔧 Intent from intent_analysis: {intent}")
         
-        # Use intent-specific diversity limits
-        diversity_limits = self.ranking_logic.get_diversity_limits(intent)
-        max_per_artist = diversity_limits.get('max_per_artist', 2)
+        # 🚀 NEW: Apply context override constraints for followup intents
+        max_per_artist = 2  # default
+        context_override_applied = False
+        
+        if state and hasattr(state, 'context_override') and state.context_override:
+            context_override = state.context_override
+            
+            self.logger.info(f"🔧 DEBUG: Judge Agent received context_override: {type(context_override)}")
+            
+            # Handle both dictionary and object formats
+            is_followup = False
+            constraint_overrides = None
+            intent_override = None
+            target_entity = None
+            
+            if isinstance(context_override, dict):
+                is_followup = context_override.get('is_followup', False)
+                constraint_overrides = context_override.get('constraint_overrides')
+                intent_override = context_override.get('intent_override')
+                target_entity = context_override.get('target_entity')
+            elif hasattr(context_override, 'is_followup'):
+                is_followup = context_override.is_followup
+                constraint_overrides = getattr(context_override, 'constraint_overrides', None)
+                intent_override = getattr(context_override, 'intent_override', None)
+                target_entity = getattr(context_override, 'target_entity', None)
+            
+            if is_followup and constraint_overrides:
+                # Apply context-specific constraints
+                target_artist = constraint_overrides.get('target_artist') if isinstance(constraint_overrides, dict) else None
+                
+                self.logger.info(
+                    "🚀 Context override detected",
+                    intent_override=intent_override,
+                    target_entity=target_entity,
+                    target_artist=target_artist
+                )
+                
+                if intent_override in ['artist_deep_dive', 'artist_similarity'] and target_entity:
+                    # For artist-focused followup queries, allow many more tracks from target artist
+                    max_per_artist = constraint_overrides.get('max_per_artist', 10) if isinstance(constraint_overrides, dict) else 10
+                    context_override_applied = True
+                    
+                    self.logger.info(
+                        f"🎯 Artist followup query: allowing up to {max_per_artist} tracks from {target_entity}"
+                    )
+                elif intent_override == 'artist_style_refinement' and target_entity:
+                    # 🔧 NEW: Artist-style refinement handling
+                    # Allow more tracks from target artist, but less than pure artist similarity
+                    max_per_artist = 8  # Slightly less than pure artist similarity
+                    context_override_applied = True
+                    
+                    # Get style modifier for logging
+                    style_modifier = None
+                    if isinstance(context_override, dict):
+                        style_modifier = context_override.get('style_modifier')
+                    elif hasattr(context_override, 'style_modifier'):
+                        style_modifier = getattr(context_override, 'style_modifier', None)
+                    
+                    self.logger.info(
+                        f"🎵 Artist-style refinement: allowing up to {max_per_artist} tracks "
+                        f"from {target_entity} with style '{style_modifier}'"
+                    )
+                elif intent_override == 'style_continuation':
+                    # For style continuation, moderate increase
+                    max_per_artist = constraint_overrides.get('max_per_artist', 3) if isinstance(constraint_overrides, dict) else 3
+                    context_override_applied = True
+                    
+                    self.logger.info(
+                        f"🎵 Style continuation: allowing up to {max_per_artist} tracks per artist"
+                    )
+            else:
+                self.logger.info(f"🔧 DEBUG: No context override applied - is_followup={is_followup}, has_constraints={bool(constraint_overrides)}")
+        
+        # Apply appropriate diversity limits
+        if not context_override_applied:
+            diversity_limits = self.ranking_logic.get_diversity_limits(intent)
+            max_per_artist = diversity_limits.get('max_per_artist', 2)
+        
+        # 🎯 NEW: Check if this is a genre-specific query requiring different logic
+        is_genre_specific_query = False
+        if state and state.entities:
+            entities = state.entities
+            intent_analysis = state.intent_analysis or {}
+            
+            # Check if this is a hybrid query with specific genre requirements
+            musical_entities = entities.get('musical_entities', {})
+            genres_primary = musical_entities.get('genres', {}).get('primary')
+            is_hybrid = (intent_analysis.get('intent') == 'hybrid' or 
+                        intent_analysis.get('primary_intent') == 'hybrid')
+            
+            is_genre_specific_query = bool(genres_primary and is_hybrid)
+            
+            if is_genre_specific_query:
+                self.logger.info(f"🎯 Genre-specific query detected: prioritizing genre_mood_agent tracks for genres {genres_primary}")
         
         self.logger.debug(f"🔧 DEBUG: Intent: {intent}, max tracks per artist: {max_per_artist}")
-        
         self.logger.debug(f"Starting diversity selection with {len(ranked_candidates)} candidates")
         
         for i, (candidate, scores) in enumerate(ranked_candidates):
@@ -496,15 +588,26 @@ class JudgeAgent(BaseAgent):
                 f"source={candidate.source}, score={scores.get('final_score', 0):.3f}"
             )
             
-            # Check artist diversity using intent-specific limits
+            # Check artist diversity using context-aware limits
             if artist_counts.get(candidate.artist, 0) >= max_per_artist:
                 self.logger.debug(f"Skipping {candidate.title}: too many tracks from {candidate.artist}")
                 continue
             
-            # Check source distribution
+            # 🎯 MODIFIED: Genre-aware source distribution
             source_count = source_counts.get(candidate.source, 0)
-            max_per_source = int(self.final_recommendations * 
-                               self.diversity_targets['source_distribution'].get(candidate.source, 0.3))
+            
+            if is_genre_specific_query:
+                # For genre-specific queries, relax source constraints for genre_mood_agent
+                if candidate.source == 'genre_mood_agent':
+                    # Allow more genre_mood_agent tracks (up to 80% of recommendations)
+                    max_per_source = int(self.final_recommendations * 0.8)
+                else:
+                    # Restrict other sources more (discovery, planner) 
+                    max_per_source = int(self.final_recommendations * 0.2)
+            else:
+                # Standard source distribution for non-genre queries
+                max_per_source = int(self.final_recommendations * 
+                                     self.diversity_targets['source_distribution'].get(candidate.source, 0.3))
             
             self.logger.debug(
                 f"Source check: {candidate.source} count={source_count}, max={max_per_source}"
@@ -532,6 +635,11 @@ class JudgeAgent(BaseAgent):
         self.logger.info(
             f"🔧 DEBUG: Diversity filtering: {len(ranked_candidates)} -> {len(selected)} candidates"
         )
+        
+        if context_override_applied:
+            self.logger.info(
+                f"🚀 Context override applied - final artist distribution: {dict(artist_counts)}"
+            )
         
         self.logger.info(
             f"Selected {len(selected)} recommendations with diversity",
@@ -691,7 +799,7 @@ class JudgeAgent(BaseAgent):
                 
                 # 🔧 KEY FIX: "Music like [Artist] but [style]" = similarity_primary 
                 if has_similarity and has_artists and has_style_modifier:
-                    self.logger.info(f"🔧 DETECTED SIMILARITY-PRIMARY: Query has artist + similarity phrase + style modifier")
+                    self.logger.info(f"🔧 DETECTED SIMILARITY-PRIMARY: Query '{query}' has artist + similarity phrase + style modifier")
                     return 'hybrid_similarity_primary'
                 
                 # Discovery-primary indicators
@@ -699,11 +807,11 @@ class JudgeAgent(BaseAgent):
                 has_discovery = any(term in query for term in discovery_terms)
                 
                 if has_discovery:
-                    self.logger.info(f"🔧 DETECTED DISCOVERY-PRIMARY: Query has discovery indicators")
+                    self.logger.info(f"🔧 DETECTED DISCOVERY-PRIMARY: Query '{query}' has discovery indicators")
                     return 'hybrid_discovery_primary'
                 
                 # Genre-primary fallback
-                self.logger.info(f"🔧 DETECTED GENRE-PRIMARY: Default for style-focused hybrid")
+                self.logger.info(f"🔧 DETECTED GENRE-PRIMARY: Default for style-focused hybrid query '{query}'")
                 return 'hybrid_genre_primary'
             
             # Fallback: detect from query and entities using query utils

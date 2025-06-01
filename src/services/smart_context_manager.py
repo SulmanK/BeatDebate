@@ -642,3 +642,96 @@ class SmartContextManager:
             },
             "summary": f"Active context with {interaction_count} interactions"
         } 
+    
+    async def get_session_context(self, session_id: str) -> Optional[Dict[str, Any]]:
+        """
+        Get session context from conversation manager.
+        
+        Args:
+            session_id: Session identifier
+            
+        Returns:
+            Session context or None if not found
+        """
+        return await self.conversation_manager.get_session_context(session_id)
+    
+    async def integrate_chat_history(
+        self,
+        session_id: str,
+        chat_conversation_history: List[Dict]
+    ) -> Dict[str, Any]:
+        """
+        Integrate conversation history from chat interface with backend session context.
+        
+        Args:
+            session_id: Session identifier
+            chat_conversation_history: Conversation history from chat interface
+            
+        Returns:
+            Updated session context
+        """
+        self.logger.info(f"Integrating chat history for session {session_id}")
+        
+        # Get existing session context
+        session_context = await self.conversation_manager.get_session_context(session_id)
+        
+        if not session_context:
+            # Create new session with chat history
+            session_context = {
+                "interaction_history": [],
+                "preference_profile": {
+                    "preferred_genres": {},
+                    "preferred_artists": {},
+                    "preferred_moods": {},
+                    "preferred_activities": {},
+                    "discovery_openness": 0.5,
+                    "quality_preferences": {}
+                },
+                "recommendation_history": [],
+                "entity_evolution": {},
+                "session_start": datetime.now(),
+                "last_updated": datetime.now()
+            }
+        
+        # Merge chat interface history with session context
+        existing_queries = {
+            interaction.get("query", "") for interaction in 
+            session_context.get("interaction_history", [])
+        }
+        
+        for chat_interaction in chat_conversation_history:
+            user_message = chat_interaction.get("user_message", "")
+            recommendations = chat_interaction.get("recommendations", [])
+            
+            # Skip if already in session context
+            if user_message in existing_queries:
+                continue
+            
+            # Add to interaction history
+            interaction = {
+                "timestamp": datetime.now(),
+                "query": user_message,
+                "extracted_entities": {},  # Will be filled by entity extraction
+                "recommendations": recommendations,
+                "user_feedback": None
+            }
+            
+            session_context["interaction_history"].append(interaction)
+            
+            # Update recommendation history
+            if recommendations:
+                session_context["recommendation_history"].extend(recommendations)
+        
+        # Update session in conversation manager
+        # Note: This updates the existing session with new interactions
+        if session_context["interaction_history"]:
+            await self.conversation_manager.session_store.update({
+                session_id: session_context
+            })
+        
+        self.logger.info(
+            f"Integrated chat history for session {session_id}",
+            total_interactions=len(session_context["interaction_history"])
+        )
+        
+        return session_context 

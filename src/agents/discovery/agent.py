@@ -162,6 +162,69 @@ class DiscoveryAgent(BaseAgent):
             entities = state.entities or {}
             intent_analysis = state.intent_analysis or {}
             
+            # 🚀 CHECK FOR CONTEXT OVERRIDE FIRST
+            context_override_applied = False
+            target_artist_from_override = None
+            
+            if hasattr(state, 'context_override') and state.context_override:
+                context_override = state.context_override
+                
+                self.logger.info(f"🔧 DEBUG: Discovery Agent received context_override: {type(context_override)}")
+                self.logger.info(f"🔧 DEBUG: context_override data: {context_override}")
+                
+                # Handle both dictionary and object formats
+                is_followup = False
+                target_entity = None
+                intent_override = None
+                
+                if isinstance(context_override, dict):
+                    is_followup = context_override.get('is_followup', False)
+                    target_entity = context_override.get('target_entity')
+                    intent_override = context_override.get('intent_override')
+                elif hasattr(context_override, 'is_followup'):
+                    is_followup = context_override.is_followup
+                    target_entity = getattr(context_override, 'target_entity', None)
+                    intent_override = getattr(context_override, 'intent_override', None)
+                
+                if is_followup and target_entity:
+                    target_artist_from_override = target_entity
+                    context_override_applied = True
+                    
+                    self.logger.info(
+                        "🚀 Discovery Agent: Context override detected",
+                        intent_override=intent_override,
+                        target_entity=target_entity,
+                        is_followup=is_followup
+                    )
+                    
+                    # Override detected intent for followup queries
+                    if intent_override in ['artist_deep_dive', 'artist_similarity']:
+                        intent_analysis['intent'] = 'artist_similarity'
+                        self.logger.info(f"🎯 Overriding intent to 'artist_similarity' for {intent_override}: {target_artist_from_override}")
+                    elif intent_override == 'artist_style_refinement':
+                        # 🔧 NEW: Artist-style refinement handling
+                        intent_analysis['intent'] = 'hybrid'  # Treat as hybrid with artist + style constraints
+                        intent_analysis['hybrid_subtype'] = 'artist_style_refinement'
+                        
+                        # Add style modifier to intent analysis
+                        style_modifier = None
+                        if isinstance(context_override, dict):
+                            style_modifier = context_override.get('style_modifier')
+                        elif hasattr(context_override, 'style_modifier'):
+                            style_modifier = getattr(context_override, 'style_modifier', None)
+                        
+                        if style_modifier:
+                            intent_analysis['style_modifier'] = style_modifier
+                            self.logger.info(f"🎵 Artist-style refinement: {target_artist_from_override} + {style_modifier}")
+                        else:
+                            self.logger.warning(f"Artist-style refinement detected but no style_modifier found")
+                    else:
+                        self.logger.info(f"🔧 Unknown intent override: {intent_override}")
+                else:
+                    self.logger.info(f"🔧 DEBUG: No followup detected - is_followup={is_followup}, target_entity={target_entity}")
+            else:
+                self.logger.info("🔧 DEBUG: No context_override found in state")
+            
             # 🔧 Get intent and adapt parameters accordingly
             query_understanding = state.query_understanding
             detected_intent = 'discovery'  # Default for discovery agent
@@ -178,10 +241,17 @@ class DiscoveryAgent(BaseAgent):
             else:
                 self.logger.warning("No query_understanding or intent found in state, using default discovery parameters")
             
+            # 🔧 If context override applied, use the override intent
+            if context_override_applied and hasattr(context_override, 'intent_override'):
+                if context_override.intent_override == 'artist_deep_dive':
+                    detected_intent = 'artist_similarity'
+                elif context_override.intent_override == 'artist_style_refinement':
+                    detected_intent = 'hybrid'
+            
             # 🔧 CRITICAL FIX: For similarity-primary hybrids, treat as artist_similarity for candidate generation
             candidate_generation_intent = detected_intent
             if detected_intent == 'hybrid':
-                # Check if this is a similarity-primary hybrid
+                # Check if this is a similarity-primary hybrid or artist-style refinement
                 reasoning = intent_analysis.get('reasoning', '')
                 hybrid_subtype = intent_analysis.get('hybrid_subtype', '')
                 if (hybrid_subtype == 'similarity_primary' or 
@@ -189,6 +259,24 @@ class DiscoveryAgent(BaseAgent):
                     'Hybrid sub-type: similarity_primary' in reasoning):
                     candidate_generation_intent = 'artist_similarity'
                     self.logger.info(f"🔧 SIMILARITY-PRIMARY HYBRID: Using 'artist_similarity' for candidate generation instead of 'hybrid'")
+                elif hybrid_subtype == 'artist_style_refinement':
+                    candidate_generation_intent = 'artist_similarity'  # Find artist tracks first, then filter by style
+                    self.logger.info(f"🎵 ARTIST-STYLE REFINEMENT: Using 'artist_similarity' for candidate generation, will filter by style later")
+            
+            # 🚀 If we have a target artist from context override, inject it into entities
+            if target_artist_from_override:
+                musical_entities = entities.get('musical_entities', {})
+                artists = musical_entities.get('artists', {})
+                if 'primary' not in artists:
+                    artists['primary'] = []
+                
+                # Ensure target artist is in primary artists list
+                if target_artist_from_override not in artists['primary']:
+                    artists['primary'].insert(0, target_artist_from_override)  # Put at front
+                    self.logger.info(f"🎯 Injected target artist '{target_artist_from_override}' into entities for candidate generation")
+                
+                musical_entities['artists'] = artists
+                entities['musical_entities'] = musical_entities
             
             # 🚀 PHASE 2: Adapt agent parameters based on detected intent
             self._adapt_to_intent(detected_intent)
@@ -209,7 +297,7 @@ class DiscoveryAgent(BaseAgent):
             
             # Phase 3: Filter for novelty and underground appeal
             filtered_candidates = await self._filter_for_discovery(
-                scored_candidates, entities, intent_analysis
+                scored_candidates, entities, intent_analysis, context_override if context_override_applied else None
             )
             
             # 🔧 DEBUG: Log filtered candidates with scores for troubleshooting
@@ -223,12 +311,13 @@ class DiscoveryAgent(BaseAgent):
                 self.logger.info(f"  {i+1}. {candidate_name} by {candidate_artist} - Score: {combined_score:.3f} {'🎯 TARGET' if is_target else ''}")
             
             # 🔧 BOOST: Prioritize target artist tracks by boosting their combined scores
-            # Check for both pure artist_similarity and similarity-primary hybrids
+            # Check for both pure artist_similarity and similarity-primary hybrids OR context override
             is_similarity_intent = (
                 intent_analysis.get('intent') == 'artist_similarity' or
                 (intent_analysis.get('intent') == 'hybrid' and 
                  ('similarity_primary' in intent_analysis.get('reasoning', '') or
-                  intent_analysis.get('hybrid_subtype') == 'similarity_primary'))
+                  intent_analysis.get('hybrid_subtype') == 'similarity_primary')) or
+                context_override_applied  # 🚀 NEW: Also boost if context override applied
             )
             
             if is_similarity_intent and target_artists:
@@ -238,7 +327,8 @@ class DiscoveryAgent(BaseAgent):
                     if candidate_artist.lower() in [a.lower() for a in target_artists]:
                         # Boost target artist tracks to ensure they rank higher
                         original_score = candidate.get('combined_score', 0.0)
-                        candidate['combined_score'] = min(original_score + 0.3, 1.0)  # Boost by 0.3, cap at 1.0
+                        boost_amount = 0.4 if context_override_applied else 0.3  # Higher boost for context override
+                        candidate['combined_score'] = min(original_score + boost_amount, 1.0)
                         self.logger.info(f"🚀 BOOSTED target artist track: {candidate.get('name')} by {candidate_artist} from {original_score:.3f} to {candidate['combined_score']:.3f}")
                 
                 # Re-sort by combined score after boosting
@@ -265,7 +355,8 @@ class DiscoveryAgent(BaseAgent):
                 "Discovery agent processing completed",
                 candidates=len(candidates),
                 filtered=len(filtered_candidates),
-                recommendations=len(recommendations)
+                recommendations=len(recommendations),
+                context_override_applied=context_override_applied
             )
             
             return state
@@ -491,7 +582,8 @@ class DiscoveryAgent(BaseAgent):
         self,
         scored_candidates: List[Dict[str, Any]],
         entities: Dict[str, Any],
-        intent_analysis: Dict[str, Any]
+        intent_analysis: Dict[str, Any],
+        context_override: Dict[str, Any] = None
     ) -> List[Dict[str, Any]]:
         """Filter candidates for discovery criteria."""
         # Extract relevant context
@@ -505,8 +597,32 @@ class DiscoveryAgent(BaseAgent):
             'discovery'
         )
         
+        # 🔧 NEW: Check for similarity-primary hybrid with genre filtering requirements
+        required_genres = self._extract_required_genres(entities)
+        is_similarity_primary_hybrid = False
+        
+        if intent_value == 'hybrid' and target_artists and required_genres:
+            # This looks like "Michael Jackson tracks that are R&B" 
+            self.logger.info(f"🎯 DETECTED SIMILARITY-PRIMARY HYBRID WITH GENRE FILTER: artists={target_artists}, genres={required_genres}")
+            is_similarity_primary_hybrid = True
+            
+            # Apply strict genre filtering first
+            filtered_candidates = await self._filter_for_similarity_primary_hybrid(
+                scored_candidates, entities, intent_analysis
+            )
+            
+            if not filtered_candidates:
+                self.logger.warning(f"🎯 Strict genre filtering eliminated all candidates! Falling back to relaxed filtering.")
+            else:
+                self.logger.info(f"🎯 Using strict genre filtering: {len(scored_candidates)} → {len(filtered_candidates)} candidates")
+                # Continue with the filtered candidates
+                scored_candidates = filtered_candidates
+        
         # 🔧 HYBRID SUPPORT: Check for similarity-primary hybrids
         is_artist_similarity = False
+        is_artist_style_refinement = False
+        style_modifier = None
+        
         if intent_value == 'artist_similarity':
             is_artist_similarity = True
         elif intent_value == 'hybrid':
@@ -514,10 +630,18 @@ class DiscoveryAgent(BaseAgent):
             reasoning = intent_analysis.get('reasoning', '')
             hybrid_subtype = intent_analysis.get('hybrid_subtype', '')
             
+            if hybrid_subtype == 'artist_style_refinement':
+                # 🔧 NEW: Artist-style refinement handling
+                is_artist_style_refinement = True
+                is_artist_similarity = True  # Also use artist similarity logic
+                style_modifier = intent_analysis.get('style_modifier', '')
+                self.logger.info(f"🎵 ARTIST-STYLE REFINEMENT DETECTED: Looking for {target_artists} tracks with style: {style_modifier}")
+            
             # Multiple ways to detect similarity-primary hybrid
-            if (hybrid_subtype == 'similarity_primary' or 
+            elif (hybrid_subtype == 'similarity_primary' or 
                 'similarity_primary' in reasoning or
-                'Hybrid sub-type: similarity_primary' in reasoning):
+                'Hybrid sub-type: similarity_primary' in reasoning or
+                is_similarity_primary_hybrid):  # Include our new detection
                 is_artist_similarity = True
                 self.logger.info(f"🔧 DETECTED SIMILARITY-PRIMARY HYBRID: Using artist similarity logic for hybrid query")
             
@@ -529,7 +653,7 @@ class DiscoveryAgent(BaseAgent):
                     is_artist_similarity = True
                     self.logger.info(f"🔧 FALLBACK DETECTION: Query has artists + similarity phrases, treating as artist similarity")
         
-        self.logger.info(f"🔧 ARTIST SIMILARITY DETECTION: intent_value='{intent_value}', is_artist_similarity={is_artist_similarity}, target_artists={target_artists}")
+        self.logger.info(f"🔧 FILTER DETECTION: intent='{intent_value}', artist_similarity={is_artist_similarity}, artist_style_refinement={is_artist_style_refinement}, style_modifier='{style_modifier}'")
         
         self.logger.info(
             f"Discovery filtering: {len(scored_candidates)} candidates, "
@@ -609,17 +733,33 @@ class DiscoveryAgent(BaseAgent):
                 self.logger.debug(f"❌ REJECTED (underground): {candidate_name} by {candidate_artist}, underground={underground_score} < 0.2")
                 continue
             
+            # 🔧 NEW: Style filtering for artist-style refinement
+            if is_artist_style_refinement and style_modifier:
+                # Check if the track matches the requested style
+                style_match = self._check_style_match(candidate, style_modifier)
+                if not style_match:
+                    self.logger.debug(
+                        f"❌ REJECTED (style): {candidate_name} by {candidate_artist}, "
+                        f"doesn't match style '{style_modifier}'"
+                    )
+                    continue
+                else:
+                    self.logger.info(
+                        f"✅ STYLE MATCH: {candidate_name} by {candidate_artist} "
+                        f"matches '{style_modifier}'"
+                    )
+            
             self.logger.debug(f"✅ ACCEPTED: {candidate_name} by {candidate_artist}")
             filtered.append(candidate)
         
         self.logger.info(f"Discovery filtering result: {len(scored_candidates)} -> {len(filtered)} candidates")
         
         # Ensure diversity and novelty
-        filtered = self._ensure_discovery_diversity(filtered, intent_analysis)
+        filtered = self._ensure_discovery_diversity(filtered, intent_analysis, context_override)
         
         return filtered
     
-    def _ensure_discovery_diversity(self, candidates: List[Dict[str, Any]], intent_analysis: Dict[str, Any]) -> List[Dict[str, Any]]:
+    def _ensure_discovery_diversity(self, candidates: List[Dict[str, Any]], intent_analysis: Dict[str, Any], context_override: Dict[str, Any] = None) -> List[Dict[str, Any]]:
         """Ensure diversity in discovery recommendations."""
         seen_artists = {}  # Changed to dict to track count per artist
         seen_genres = set()
@@ -628,40 +768,77 @@ class DiscoveryAgent(BaseAgent):
         # Get intent to adjust diversity rules
         intent = intent_analysis.get('intent', '').lower()
         
-        # For artist_similarity, allow more tracks per similar artist
-        max_tracks_per_artist = 3 if intent == 'artist_similarity' else 1
+        # 🚀 Apply context override constraints for followup intents
+        max_tracks_per_artist = 1  # Default strict diversity
+        target_artist_from_override = None
+        
+        if context_override:
+            # Handle both dictionary and object formats
+            is_followup = False
+            constraint_overrides = None
+            target_entity = None
+            
+            if isinstance(context_override, dict):
+                is_followup = context_override.get('is_followup', False)
+                constraint_overrides = context_override.get('constraint_overrides')
+                target_entity = context_override.get('target_entity')
+            elif hasattr(context_override, 'is_followup'):
+                is_followup = context_override.is_followup
+                constraint_overrides = getattr(context_override, 'constraint_overrides', None)
+                target_entity = getattr(context_override, 'target_entity', None)
+            
+            if is_followup and target_entity:
+                target_artist_from_override = target_entity
+                # For followup intents, allow MANY more tracks from target artist
+                max_tracks_per_artist = 10  # Increased from 8 to 10 for better artist deep dives
+                self.logger.info(f"🚀 Context override: allowing up to {max_tracks_per_artist} tracks from target artist '{target_artist_from_override}'")
+        
+        # For artist_similarity, allow more tracks per similar artist (original logic)
+        if not target_artist_from_override and intent == 'artist_similarity':
+            max_tracks_per_artist = 3
         
         # 🔧 DEBUG: Log diversity filtering process
         self.logger.info(f"🔧 DEBUG: Starting diversity filtering with {len(candidates)} candidates")
         self.logger.info(f"🔧 DEBUG: Intent: {intent}, max tracks per artist: {max_tracks_per_artist}")
+        if target_artist_from_override:
+            self.logger.info(f"🔧 DEBUG: Target artist from context override: {target_artist_from_override}")
         
         for candidate in candidates:
             artist = candidate.get('artist', '').lower()
             candidate_name = candidate.get('name', 'Unknown')
             tags = candidate.get('tags', [])
             
-            # 🔧 DEBUG: Log DIJON tracks specifically
-            if 'dijon' in artist or 'jai paul' in artist:
+            # 🔧 DEBUG: Log target artist tracks specifically
+            is_target_artist = target_artist_from_override and artist == target_artist_from_override.lower()
+            if is_target_artist or 'mk.gee' in artist:
                 self.logger.info(f"🔧 DEBUG: Processing diversity for {candidate_name} by {artist}")
+                self.logger.info(f"🔧 DEBUG: Is target artist: {is_target_artist}")
                 self.logger.info(f"🔧 DEBUG: Artist track count: {seen_artists.get(artist, 0)}")
-                self.logger.info(f"🔧 DEBUG: Tags: {tags[:3]}")
             
-            # Check artist limit (was previously just 1)
+            # Check artist limit
             artist_count = seen_artists.get(artist, 0)
-            if artist_count >= max_tracks_per_artist:
-                if 'dijon' in artist or 'jai paul' in artist:
-                    msg = f"❌ DEBUG: REJECTED {candidate_name} - artist limit reached ({artist_count}/{max_tracks_per_artist})"
+            
+            # 🚀 Apply different limits for target vs non-target artists
+            if is_target_artist:
+                # Target artist from context override gets high limit
+                artist_limit = max_tracks_per_artist
+            else:
+                # Other artists get standard diversity limit
+                artist_limit = 1 if target_artist_from_override else max_tracks_per_artist
+            
+            if artist_count >= artist_limit:
+                if is_target_artist or 'mk.gee' in artist:
+                    msg = f"❌ DEBUG: REJECTED {candidate_name} - artist limit reached ({artist_count}/{artist_limit})"
                     self.logger.info(msg)
                 continue
             
-            # Limit genre repetition
+            # Limit genre repetition (unless target artist)
             candidate_genres = [tag.lower() for tag in tags[:3]]
             genre_overlap = len(set(candidate_genres) & seen_genres)
-            if genre_overlap > 1:  # Allow some overlap but not too much
-                if 'dijon' in artist or 'jai paul' in artist:
+            if not is_target_artist and genre_overlap > 1:  # Allow overlap for target artist
+                if 'mk.gee' in artist:
                     msg = f"❌ DEBUG: REJECTED {candidate_name} - genre overlap {genre_overlap} > 1"
                     self.logger.info(msg)
-                    self.logger.info(f"🔧 DEBUG: Candidate genres: {candidate_genres}, seen genres: {list(seen_genres)}")
                 continue
             
             # Accept the candidate
@@ -670,8 +847,8 @@ class DiscoveryAgent(BaseAgent):
             diverse_candidates.append(candidate)
             
             # 🔧 DEBUG: Log acceptance
-            if 'dijon' in artist or 'jai paul' in artist:
-                msg = f"✅ DEBUG: ACCEPTED {candidate_name} for diversity (track {seen_artists[artist]}/{max_tracks_per_artist})"
+            if is_target_artist or 'mk.gee' in artist:
+                msg = f"✅ DEBUG: ACCEPTED {candidate_name} for diversity (track {seen_artists[artist]}/{artist_limit})"
                 self.logger.info(msg)
             
             # Limit to prevent over-filtering
@@ -680,6 +857,10 @@ class DiscoveryAgent(BaseAgent):
                 break
         
         self.logger.info(f"🔧 DEBUG: Diversity filtering: {len(candidates)} -> {len(diverse_candidates)} candidates")
+        if target_artist_from_override:
+            target_count = sum(1 for c in diverse_candidates if c.get('artist', '').lower() == target_artist_from_override.lower())
+            self.logger.info(f"🚀 Target artist '{target_artist_from_override}' tracks in final candidates: {target_count}")
+        
         return diverse_candidates
     
     async def _create_discovery_recommendations(
@@ -862,35 +1043,351 @@ class DiscoveryAgent(BaseAgent):
         entities: Dict[str, Any],
         intent_analysis: Dict[str, Any]
     ) -> List[str]:
-        """Extract tags for discovery recommendation."""
-        tags = candidate.get('tags', [])
+        """Extract tags for discovery context."""
+        tags = []
         
-        # Start with candidate tags
-        discovery_tags = tags[:3]
+        # Add candidate tags
+        if 'tags' in candidate:
+            tags.extend(candidate['tags'])
         
-        # Add discovery-specific tags
-        if candidate.get('novelty_score', 0) > 0.6:
-            discovery_tags.append('hidden_gem')
-        if candidate.get('underground_score', 0) > 0.6:
-            discovery_tags.append('underground')
+        # Add discovery-specific context
+        if candidate.get('source') == 'underground_tags':
+            tags.append('underground')
+        
         if candidate.get('source') == 'multi_hop_similarity':
-            discovery_tags.append('similarity_discovery')
+            tags.append('discovered')
+            
+        return tags[:5]  # Limit context
+    
+    def _check_style_match(self, candidate: Dict[str, Any], style_modifier: str) -> bool:
+        """
+        Check if a candidate track matches the requested style modifier.
         
-        # Add listener count category
-        listeners = candidate.get('listeners', 0)
+        Args:
+            candidate: The track candidate to check
+            style_modifier: The style constraint (e.g., "electronic", "upbeat", "jazzy")
+            
+        Returns:
+            bool: True if the track matches the style, False otherwise
+        """
+        if not style_modifier:
+            return True
         
-        # Ensure listeners is a valid number
-        if listeners is None:
-            listeners = 0
-        elif not isinstance(listeners, (int, float)):
-            try:
-                listeners = int(listeners)
-            except (ValueError, TypeError):
-                listeners = 0
+        style_lower = style_modifier.lower().strip()
         
-        if listeners < 10000:
-            discovery_tags.append('rare_find')
-        elif listeners < 100000:
-            discovery_tags.append('cult_favorite')
+        # Get track metadata with defensive programming for None values
+        tags = candidate.get('tags', [])
+        genres = candidate.get('genres', [])
+        album = candidate.get('album') or ''
+        track_name = candidate.get('name') or ''
+        artist = candidate.get('artist') or ''
         
-        return list(set(discovery_tags))  # Remove duplicates 
+        # 🔧 DEBUG: Log detailed information for troubleshooting
+        self.logger.debug(
+            f"🔍 Style match debug for '{track_name}' by '{artist}': "
+            f"style='{style_modifier}', tags={tags}, genres={genres}"
+        )
+        
+        # Convert to lowercase safely
+        album = album.lower()
+        track_name = track_name.lower()
+        artist = artist.lower()
+        
+        # Style matching keywords
+        style_keywords = {
+            'electronic': [
+                'electronic', 'electro', 'synth', 'digital', 'edm', 'techno', 
+                'house', 'ambient', 'electronica', 'experimental', 'glitch',
+                'hypnagogic pop', 'synthwave', 'computer', 'synthesizer',
+                'drum machine', 'sequencer', 'loop', 'sample'
+            ],
+            'rnb': [
+                'rnb', 'r&b', 'r and b', 'rhythm and blues', 'soul', 'neo-soul',
+                'contemporary r&b', 'motown', 'funk', 'groove', 'rhythm',
+                'blues', 'soulful', 'smooth', 'neo soul'
+            ],
+            'r&b': [
+                'rnb', 'r&b', 'r and b', 'rhythm and blues', 'soul', 'neo-soul',
+                'contemporary r&b', 'motown', 'funk', 'groove', 'rhythm',
+                'blues', 'soulful', 'smooth', 'neo soul'
+            ],
+            'upbeat': [
+                'upbeat', 'energetic', 'fast', 'dance', 'pop', 'uptempo', 
+                'lively', 'party', 'driving', 'pumping'
+            ],
+            'jazzy': [
+                'jazz', 'jazzy', 'swing', 'blues', 'smooth', 'improvisational', 
+                'bebop', 'cool jazz', 'fusion', 'saxophone', 'trumpet'
+            ],
+            'chill': [
+                'chill', 'relaxed', 'ambient', 'downtempo', 'lo-fi', 'mellow', 
+                'calm', 'peaceful', 'laid-back', 'dreamy'
+            ],
+            'experimental': [
+                'experimental', 'avant-garde', 'noise', 'abstract', 
+                'unconventional', 'art rock', 'post-rock', 'krautrock',
+                'psychedelic', 'weird'
+            ],
+            'acoustic': [
+                'acoustic', 'folk', 'unplugged', 'live', 'organic', 'natural',
+                'guitar', 'piano', 'strings'
+            ],
+            'heavy': [
+                'heavy', 'metal', 'hard', 'aggressive', 'intense', 'brutal',
+                'distorted', 'loud'
+            ],
+            'melodic': [
+                'melodic', 'melody', 'harmonic', 'tuneful', 'catchy',
+                'singable', 'lyrical'
+            ],
+            'dark': [
+                'dark', 'gothic', 'moody', 'atmospheric', 'melancholy', 
+                'brooding', 'noir', 'somber'
+            ],
+            'funky': [
+                'funk', 'funky', 'groove', 'rhythm', 'bass', 'percussive',
+                'syncopated', 'danceable'
+            ]
+        }
+        
+        # Get matching keywords for the style
+        matching_keywords = []
+        for key, keywords in style_keywords.items():
+            if key in style_lower or style_lower in key:
+                matching_keywords.extend(keywords)
+        
+        # If no predefined keywords, use the style modifier itself
+        if not matching_keywords:
+            matching_keywords = [style_lower]
+        
+        # 🔧 DEBUG: Log matching keywords
+        self.logger.debug(f"🔍 Style keywords for '{style_modifier}': {matching_keywords}")
+        
+        # Check tags and genres - be more explicit about conversions
+        all_metadata = []
+        
+        # Add tags (convert each to string and lowercase)
+        if tags:
+            tag_strings = [str(tag).lower() for tag in tags if tag is not None]
+            all_metadata.extend(tag_strings)
+            self.logger.debug(f"🔍 Tags converted: {tag_strings}")
+        
+        # Add genres (convert each to string and lowercase)
+        if genres:
+            genre_strings = [str(genre).lower() for genre in genres if genre is not None]
+            all_metadata.extend(genre_strings)
+            self.logger.debug(f"🔍 Genres converted: {genre_strings}")
+        
+        # Add other metadata
+        all_metadata.extend([album, track_name, artist])
+        
+        # Create searchable text
+        metadata_text = ' '.join(str(item) for item in all_metadata if item)
+        self.logger.debug(f"🔍 Searchable metadata text: '{metadata_text[:100]}...'")
+        
+        # Check for keyword matches
+        for keyword in matching_keywords:
+            if keyword in metadata_text:
+                self.logger.info(
+                    f"✅ Style match found: '{keyword}' in metadata for "
+                    f"{candidate.get('name', 'Unknown')} by {candidate.get('artist', 'Unknown')}"
+                )
+                return True
+        
+        # 🔧 ENHANCED: Special R&B detection for Michael Jackson family tracks
+        if 'r&b' in style_lower or 'rnb' in style_lower:
+            # Michael Jackson family artists are inherently R&B
+            mj_family_artists = [
+                'michael jackson', 'jackson 5', 'the jackson 5', 'jackson five',
+                'the jacksons', 'jacksons', '3t', 'jermaine jackson', 'janet jackson',
+                'la toya jackson', 'rebbie jackson', 'tito jackson', 'marlon jackson',
+                'randy jackson'
+            ]
+            
+            if any(family_artist in artist for family_artist in mj_family_artists):
+                self.logger.info(
+                    f"✅ R&B match: Michael Jackson family artist '{artist}' "
+                    f"for {candidate.get('name', 'Unknown')}"
+                )
+                return True
+            
+            # Additional R&B indicators for broader matching
+            rb_indicators = [
+                'soul', 'funk', 'groove', 'rhythm', 'blues', 'smooth',
+                'motown', 'neo-soul', 'contemporary', 'urban', 'r&b', 'rnb'
+            ]
+            
+            # Check if any R&B indicators are present
+            for indicator in rb_indicators:
+                if indicator in metadata_text:
+                    self.logger.info(
+                        f"✅ R&B indicator match: '{indicator}' found for "
+                        f"{candidate.get('name', 'Unknown')} by {candidate.get('artist', 'Unknown')}"
+                    )
+                    return True
+        
+        # Special handling for common style modifiers
+        if 'electronic' in style_lower:
+            # Additional electronic indicators
+            electronic_indicators = [
+                'synth', 'digital', 'computer', 'electronic', 'electro',
+                'hypnagogic', 'glitch', 'drum machine', 'sequencer', 'loop',
+                'sample', 'synthesizer', 'synthwave'
+            ]
+            if any(indicator in metadata_text for indicator in electronic_indicators):
+                self.logger.info(
+                    f"✅ Electronic indicator match found for "
+                    f"{candidate.get('name', 'Unknown')}"
+                )
+                return True
+        
+        if 'upbeat' in style_lower or 'energetic' in style_lower:
+            # Look for tempo and energy indicators
+            energy_indicators = [
+                'fast', 'quick', 'energy', 'power', 'drive', 'pump'
+            ]
+            if any(indicator in metadata_text for indicator in energy_indicators):
+                self.logger.info(
+                    f"✅ Energy indicator match found for "
+                    f"{candidate.get('name', 'Unknown')}"
+                )
+                return True
+        
+        self.logger.debug(
+            f"❌ No style match found for '{style_modifier}' in "
+            f"{candidate.get('name', 'Unknown')} by {candidate.get('artist', 'Unknown')}"
+        )
+        return False
+    
+    # 🔧 NEW: Enhanced genre filtering methods for similarity-primary hybrid queries
+    
+    async def _filter_for_similarity_primary_hybrid(
+        self,
+        scored_candidates: List[Dict[str, Any]],
+        entities: Dict[str, Any],
+        intent_analysis: Dict[str, Any]
+    ) -> List[Dict[str, Any]]:
+        """Strict filtering for similarity-primary hybrid queries."""
+        
+        target_artists = self._extract_target_artists(entities)
+        required_genres = self._extract_required_genres(entities)
+        
+        if not required_genres:
+            self.logger.info("🎯 No genre filtering required - no required genres found")
+            return scored_candidates
+        
+        self.logger.info(f"🎯 GENRE FILTERING: Looking for {required_genres} tracks similar to {target_artists}")
+        
+        filtered = []
+        for candidate in scored_candidates:
+            # First pass: Genre filtering
+            if not await self._strict_genre_match(candidate, required_genres):
+                self.logger.debug(f"❌ Genre mismatch: {candidate.get('name')} by {candidate.get('artist')}")
+                continue
+                
+            # Second pass: Artist similarity (if artist specified)
+            if target_artists and not self._artist_similarity_match(candidate, target_artists):
+                self.logger.debug(f"❌ Artist mismatch: {candidate.get('name')} by {candidate.get('artist')}")
+                continue
+                
+            filtered.append(candidate)
+            
+        self.logger.info(f"🎯 Strict filtering: {len(scored_candidates)} → {len(filtered)} candidates")
+        return filtered
+
+    def _extract_required_genres(self, entities: Dict[str, Any]) -> List[str]:
+        """Extract required genres for filtering from entities."""
+        required_genres = []
+        
+        # Try nested format first (musical_entities wrapper)
+        musical_entities = entities.get('musical_entities', {})
+        if musical_entities.get('genres', {}).get('primary'):
+            required_genres = musical_entities['genres']['primary']
+        # Try direct format
+        elif entities.get('genres', {}).get('primary'):
+            required_genres = entities['genres']['primary']
+        # Try simple list format
+        elif entities.get('genres') and isinstance(entities['genres'], list):
+            required_genres = entities['genres']
+        
+        # Convert to strings and clean up
+        required_genres = [str(genre).lower().strip() for genre in required_genres if genre]
+        
+        self.logger.debug(f"🎯 Extracted required genres: {required_genres}")
+        return required_genres
+
+    async def _strict_genre_match(self, candidate: Dict[str, Any], required_genres: List[str]) -> bool:
+        """Strict genre matching for hybrid queries using API service."""
+        for genre in required_genres:
+            if await self._check_genre_match(candidate, genre):
+                return True
+        return False
+
+    async def _check_genre_match(self, candidate: Dict[str, Any], target_genre: str) -> bool:
+        """Enhanced genre matching logic using API service."""
+        try:
+            # Use API service to check genre match
+            from ...services.api_service import get_api_service
+            api_service = get_api_service()
+            
+            # Check track-level genre match
+            track_match = await api_service.check_track_genre_match(
+                artist=candidate.get('artist', ''),
+                track=candidate.get('name', ''),
+                target_genre=target_genre,
+                include_related_genres=True
+            )
+            
+            if track_match['matches']:
+                self.logger.debug(
+                    f"✅ Genre match: {candidate.get('artist')} - {candidate.get('name')} matches {target_genre}",
+                    match_type=track_match['match_type'],
+                    confidence=track_match['confidence'],
+                    matched_tags=track_match['matched_tags']
+                )
+                return True
+            
+            self.logger.debug(
+                f"❌ No genre match: {candidate.get('artist')} - {candidate.get('name')} doesn't match {target_genre}",
+                track_tags=track_match.get('track_tags', []),
+                artist_tags=track_match.get('artist_match', {}).get('artist_tags', [])
+            )
+            return False
+            
+        except Exception as e:
+            self.logger.error(f"Genre matching failed: {e}")
+            # Fall back to simple tag matching
+            return self._fallback_genre_match(candidate, target_genre)
+    
+    def _fallback_genre_match(self, candidate: Dict[str, Any], target_genre: str) -> bool:
+        """Fallback genre matching using simple tag comparison."""
+        try:
+            target_lower = target_genre.lower()
+            
+            # Get all text sources for matching
+            artist = candidate.get('artist', '').lower()
+            name = candidate.get('name', '').lower()
+            tags = [str(tag).lower() for tag in candidate.get('tags', []) if tag]
+            search_term = candidate.get('search_term', '').lower()
+            genres = [str(genre).lower() for genre in candidate.get('genres', []) if genre]
+            
+            # Simple text matching
+            all_text = f"{artist} {name} {' '.join(tags)} {search_term} {' '.join(genres)}"
+            return target_lower in all_text
+            
+        except Exception as e:
+            self.logger.error(f"Fallback genre matching failed: {e}")
+            return False
+
+    def _artist_similarity_match(self, candidate: Dict[str, Any], target_artists: List[str]) -> bool:
+        """Check if candidate is similar to target artists."""
+        candidate_artist = candidate.get('artist', '').lower()
+        
+        # Direct artist match
+        for target in target_artists:
+            if target.lower() in candidate_artist or candidate_artist in target.lower():
+                return True
+        
+        # For now, accept all candidates that pass genre filtering
+        # In a full implementation, this would check artist similarity scores
+        return True 

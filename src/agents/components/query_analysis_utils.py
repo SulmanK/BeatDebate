@@ -6,7 +6,7 @@ providing a unified approach to query understanding and intent detection.
 """
 
 import re
-from typing import Dict, List, Any, Optional, Tuple
+from typing import Dict, List, Any
 import structlog
 
 logger = structlog.get_logger(__name__)
@@ -141,18 +141,12 @@ class QueryAnalysisUtils:
         
         if intent_scores:
             # Check for hybrid intent patterns
-            has_discovery = 'discovery' in intent_scores
             has_genre = 'genre_specific' in intent_scores  
             has_similarity = 'similarity' in intent_scores
             has_mood = 'mood_based' in intent_scores
             
-            # Hybrid detection rules based on design document
-            if has_discovery and has_genre:
-                # "underground indie rock" = discovery + genre -> HYBRID
-                primary_intent = 'hybrid'
-                primary_confidence = 0.8
-                self.logger.info(f"🔧 HYBRID DETECTED: discovery + genre in query: '{query}'")
-            elif has_similarity and (has_mood or has_genre):
+            # Multi-intent detection for hybrid queries
+            if has_similarity and (has_mood or has_genre):
                 # "chill songs like Bon Iver" = similarity + mood -> HYBRID
                 primary_intent = 'hybrid'
                 primary_confidence = 0.8
@@ -572,7 +566,7 @@ class QueryAnalysisUtils:
     
     def extract_genre_hints(self, query: str) -> List[str]:
         """
-        Extract genre hints from query text.
+        Extract genre hints from query text with enhanced R&B detection.
         
         Args:
             query: User query text
@@ -583,16 +577,29 @@ class QueryAnalysisUtils:
         query_lower = query.lower()
         genre_hints = []
         
-        # Common genres
+        # 🔧 ENHANCED: R&B specific detection patterns first
+        rb_patterns = [
+            r'\br&b\b', r'\brnb\b', r'\brhythm\s+and\s+blues\b',
+            r'\br\s*&\s*b\b', r'\br\s*n\s*b\b', r'\br\s+and\s+b\b'
+        ]
+        
+        for pattern in rb_patterns:
+            if re.search(pattern, query_lower):
+                genre_hints.append('r&b')
+                self.logger.info(f"🎯 R&B DETECTED: Pattern '{pattern}' found in query")
+                break
+        
+        # Enhanced genre list with R&B variants
         genres = [
-            'rock', 'pop', 'electronic', 'jazz', 'classical', 'hip hop',
+            'rock', 'pop', 'electronic', 'jazz', 'classical', 'hip hop', 'hip-hop',
             'country', 'folk', 'metal', 'indie', 'alternative', 'blues',
-            'reggae', 'punk', 'funk', 'soul', 'r&b', 'techno', 'house',
-            'ambient', 'experimental', 'world', 'latin', 'gospel'
+            'reggae', 'punk', 'funk', 'soul', 'r&b', 'rnb', 'rhythm and blues',
+            'techno', 'house', 'ambient', 'experimental', 'world', 'latin', 
+            'gospel', 'motown', 'neo-soul', 'contemporary r&b'
         ]
         
         for genre in genres:
-            if genre in query_lower:
+            if genre in query_lower and genre not in genre_hints:
                 genre_hints.append(genre)
         
         # Genre-related patterns
@@ -600,16 +607,22 @@ class QueryAnalysisUtils:
             r'\b(\w+)\s+music\b',
             r'\b(\w+)\s+genre\b',
             r'\b(\w+)\s+style\b',
-            r'\b(\w+)\s+sound\b'
+            r'\b(\w+)\s+sound\b',
+            r'\b(\w+)\s+tracks?\b',
+            r'\b(\w+)\s+songs?\b'
         ]
         
         for pattern in genre_patterns:
             matches = re.findall(pattern, query_lower)
             for match in matches:
                 if len(match) > 2 and match not in genre_hints:
-                    genre_hints.append(match)
+                    # Check if it's a known genre or genre-like term
+                    if (match in genres or 
+                        any(genre_word in match for genre_word in ['jazz', 'rock', 'pop', 'electronic', 'soul', 'funk']) or
+                        match.endswith('y') and len(match) > 4):  # jazzy, rocky, etc.
+                        genre_hints.append(match)
         
-        # Remove duplicates
+        # Remove duplicates while preserving order
         genre_hints = list(dict.fromkeys(genre_hints))
         
         self.logger.debug(
@@ -684,6 +697,8 @@ class QueryAnalysisUtils:
         Returns:
             Hybrid sub-type: discovery_primary, similarity_primary, or genre_primary
         """
+        import re
+        
         query_lower = query.lower()
         
         # Discovery indicators - words that suggest underground/novelty focus
@@ -702,72 +717,124 @@ class QueryAnalysisUtils:
         # Count discovery indicators
         discovery_score = sum(1 for term in discovery_terms if term in query_lower)
         
-        # 🔧 ROBUST ARTIST SIMILARITY DETECTION
+        # 🔧 ENHANCED ARTIST SIMILARITY DETECTION
         has_artist_similarity = False
         artist_names = []
         
-        # Method 1: Check entities first
-        if entities and entities.get('musical_entities', {}).get('artists', {}).get('primary'):
-            artist_names = entities['musical_entities']['artists']['primary']
+        # Method 1: Check entities first - handle both formats
+        artists_data = None
+        if entities:
+            # Try nested format first (musical_entities wrapper)
+            if entities.get('musical_entities', {}).get('artists', {}).get('primary'):
+                artists_data = entities['musical_entities']['artists']['primary']
+            # Try direct format (direct entities)
+            elif entities.get('artists', {}).get('primary'):
+                artists_data = entities['artists']['primary']
+                
+        if artists_data:
+            artist_names = [
+                artist.get('name', str(artist)) if isinstance(artist, dict) else str(artist)
+                for artist in artists_data
+            ]
+            
+            # Traditional similarity phrases
             has_similarity_phrase = any(phrase in query_lower for phrase in similarity_phrases)
             if has_similarity_phrase:
                 has_artist_similarity = True
-                self.logger.info(f"🔧 ARTIST SIMILARITY DETECTED: Found artists {artist_names} with similarity phrase in query")
+                self.logger.info("🔧 ARTIST SIMILARITY DETECTED: Found artists %s with similarity phrase in query", artist_names)
+            
+            # 🔧 NEW: Artist-focused patterns (even without similarity phrases)
+            else:
+                # Pattern 1: "Artist tracks that are Genre" -> artist-focused
+                artist_track_patterns = [
+                    r'\b\w+\s+tracks?\s+that\s+are\b',  # "X tracks that are"
+                    r'\b\w+\s+songs?\s+that\s+are\b',   # "X songs that are" 
+                    r'\b\w+\s+music\s+that\s+is\b',     # "X music that is"
+                    r'\bmusic\s+by\s+\w+\s+that\b',     # "music by X that"
+                    r'\b\w+\'s\s+\w+\s+tracks?\b',      # "X's jazz tracks"
+                    r'\b\w+\'s\s+\w+\s+songs?\b'        # "X's rock songs"
+                ]
+                
+                has_artist_pattern = any(re.search(pattern, query_lower) for pattern in artist_track_patterns)
+                
+                # Pattern 2: Artist mentioned with genre/style modifiers
+                has_genre_mention = False
+                if entities:
+                    # Try both formats for genres
+                    if entities.get('musical_entities', {}).get('genres', {}).get('primary'):
+                        has_genre_mention = True
+                    elif entities.get('genres', {}).get('primary'):
+                        has_genre_mention = True
+                
+                if has_artist_pattern or has_genre_mention:
+                    has_artist_similarity = True
+                    self.logger.info("🔧 ARTIST-FOCUSED PATTERN DETECTED: Artists %s with track/genre pattern", artist_names)
         
         # Method 2: Fallback - look for direct artist names with similarity phrases
         if not has_artist_similarity:
             for phrase in similarity_phrases:
                 if phrase in query_lower:
                     # Look for likely artist names (capitalized words) in the query
-                    import re
                     # Find all capitalized word sequences (potential artist names)
                     potential_artists = re.findall(r'\b[A-Z][a-z]+(?:\s+[A-Z][a-z]+)*\b', query)
                     if potential_artists:
                         has_artist_similarity = True
                         artist_names = potential_artists
-                        self.logger.info(f"🔧 FALLBACK ARTIST SIMILARITY: Found '{potential_artists}' with '{phrase}' in query")
+                        self.logger.info("🔧 FALLBACK ARTIST SIMILARITY: Found '%s' with '%s' in query", potential_artists, phrase)
                         break
         
         # Check for genre/mood emphasis beyond just artist similarity
         has_genre_mood_focus = self._has_genre_mood_emphasis(query_lower)
         
         # 🔧 PRIORITY LOGIC: Determine primary intent based on strength of indicators
-        self.logger.info(f"🔧 HYBRID DETECTION: discovery_score={discovery_score}, has_artist_similarity={has_artist_similarity}, artist_names={artist_names}, has_genre_mood_focus={has_genre_mood_focus}")
+        self.logger.info(
+            "🔧 HYBRID DETECTION: discovery_score=%s, has_artist_similarity=%s, artist_names=%s, has_genre_mood_focus=%s",
+            discovery_score, has_artist_similarity, artist_names, has_genre_mood_focus
+        )
         
         # Discovery-primary: Strong discovery indicators override everything
         if discovery_score >= 2:
-            self.logger.info(f"🔧 DISCOVERY-PRIMARY: {discovery_score} discovery terms found")
+            self.logger.info("🔧 DISCOVERY-PRIMARY: %s discovery terms found", discovery_score)
             return 'discovery_primary'
         
-        # Similarity-primary: Artist + similarity phrase + modifier (like "but jazzy")
+        # 🔧 NEW: Similarity-primary: Artist-focused queries (with or without similarity phrases)
         if has_artist_similarity and artist_names:
-            # Check for style modifiers after artist mention (like "but jazzy", "with electronic elements")
+            # Artist + genre = artist-focused with genre filtering
+            if has_genre_mood_focus:
+                self.logger.info("🔧 SIMILARITY-PRIMARY: Artist '%s' with genre filtering", artist_names)
+                return 'similarity_primary'
+            
+            # Artist + style modifiers = artist-focused with style variation
             style_modifiers = ['but', 'with', 'and', 'plus', 'mixed with', 'combined with', 'featuring']
             has_style_modifier = any(modifier in query_lower for modifier in style_modifiers)
             
-            if has_style_modifier or has_genre_mood_focus:
-                self.logger.info(f"🔧 SIMILARITY-PRIMARY: Artist '{artist_names}' with style modifier or genre focus")
+            if has_style_modifier:
+                self.logger.info("🔧 SIMILARITY-PRIMARY: Artist '%s' with style modifier", artist_names)
                 return 'similarity_primary'
+            
+            # Pure artist queries also go to similarity
+            self.logger.info("🔧 SIMILARITY-PRIMARY: Artist-focused query for '%s'", artist_names)
+            return 'similarity_primary'
         
         # Genre-primary: Strong genre/mood focus without clear artist similarity
         if has_genre_mood_focus and not has_artist_similarity:
-            self.logger.info(f"🔧 GENRE-PRIMARY: Strong genre/mood focus without artist similarity")
+            self.logger.info("🔧 GENRE-PRIMARY: Strong genre/mood focus without artist similarity")
             return 'genre_primary'
         
         # Discovery-primary: Even single discovery terms can indicate this intent
         if discovery_score >= 1:
-            self.logger.info(f"🔧 DISCOVERY-PRIMARY: {discovery_score} discovery term found")
+            self.logger.info("🔧 DISCOVERY-PRIMARY: %s discovery term found", discovery_score)
             return 'discovery_primary'
         
         # Default fallback based on strongest signal
         if has_artist_similarity:
-            self.logger.info(f"🔧 SIMILARITY-PRIMARY: Default for artist similarity queries")
+            self.logger.info("🔧 SIMILARITY-PRIMARY: Default for artist similarity queries")
             return 'similarity_primary'
         elif has_genre_mood_focus:
-            self.logger.info(f"🔧 GENRE-PRIMARY: Default for genre/mood queries")
+            self.logger.info("🔧 GENRE-PRIMARY: Default for genre/mood queries")
             return 'genre_primary'
         else:
-            self.logger.info(f"🔧 GENRE-PRIMARY: Default fallback")
+            self.logger.info("🔧 GENRE-PRIMARY: Default fallback")
             return 'genre_primary'
     
     def _count_artist_mentions(self, query_lower: str) -> int:

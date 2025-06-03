@@ -442,17 +442,12 @@ class JudgeAgent(BaseAgent):
         scoring_weights = ranking_logic.get_intent_weights(intent)
         self.logger.info(f"🔧 Using scoring weights for intent '{intent}': {scoring_weights}")
         
-        # Get intent-specific novelty threshold
-        novelty_threshold = ranking_logic.get_novelty_threshold(intent)
-        self.logger.info(f"🔧 Using novelty threshold for intent '{intent}': {novelty_threshold}")
-        
-        # Rank candidates using intent-aware logic
+        # Rank candidates using intent-aware logic with dynamic novelty threshold detection
         ranked_candidates = ranking_logic.rank_recommendations(
             candidates=scored_candidates, 
             intent=intent,
             entities=state.entities,
             intent_analysis=state.intent_analysis,
-            novelty_threshold=novelty_threshold,
             scoring_weights=scoring_weights
         )
         

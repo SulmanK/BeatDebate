@@ -267,51 +267,55 @@ class PopularityBalancer:
     
     def calculate_popularity_score(
         self, 
-        track_data: Dict, 
-        intent_analysis: Dict
+        listeners: int, 
+        playcount: int, 
+        exploration_openness: float = 0.5,
+        entities: Dict[str, Any] = None,
+        intent_analysis: Dict[str, Any] = None
     ) -> float:
         """
-        Calculate popularity-adjusted quality score.
+        Calculate popularity-based score with configurable exploration preference.
         
         Args:
-            track_data: Track metadata including play counts
-            intent_analysis: User intent including exploration preferences
+            listeners: Number of unique listeners
+            playcount: Total play count
+            exploration_openness: 0.0 = prefer popular, 1.0 = prefer underground
+            entities: Musical entities from query understanding
+            intent_analysis: Intent analysis for context-aware scoring
             
         Returns:
-            Popularity balance score (0.0 - 1.0)
+            Score from 0.0 to 1.0
         """
-        try:
-            playcount = int(track_data.get('playcount') or 0)
-            listeners = int(track_data.get('listeners') or 0)
+        # 🎯 NEW: Adjust exploration for genre-hybrid queries
+        if entities and intent_analysis and self._is_genre_hybrid_query(entities, intent_analysis):
+            exploration_openness = 0.75  # More tolerant of popular tracks for genre examples
             
-            # Calculate base popularity score (log scale)
-            popularity_score = self._calculate_base_popularity(playcount, listeners)
-            
-            # Get user's exploration preferences
-            exploration_openness = intent_analysis.get('exploration_openness', 0.5)
-            
-            # Adjust score based on exploration preferences
-            adjusted_score = self._adjust_for_exploration_preference(
-                popularity_score, 
-                exploration_openness
-            )
-            
-            self.logger.debug(
-                "Popularity score calculated",
-                playcount=playcount,
-                listeners=listeners,
-                base_popularity=popularity_score,
-                exploration_openness=exploration_openness,
-                final_score=adjusted_score
-            )
-            
-            return adjusted_score
-            
-        except Exception as e:
-            self.logger.warning("Popularity scoring failed", error=str(e))
-            return 0.5  # Default neutral score
+        base_popularity = self._calculate_base_popularity(listeners, playcount)
+        
+        # Apply exploration preference
+        if exploration_openness <= 0.5:
+            # Prefer popular tracks
+            preference_factor = (0.5 - exploration_openness) * 2
+            score = base_popularity + (1 - base_popularity) * preference_factor
+        else:
+            # Prefer underground tracks  
+            preference_factor = (exploration_openness - 0.5) * 2
+            score = base_popularity * (1 - preference_factor)
+        
+        final_score = max(0.0, min(1.0, score))
+        
+        self.logger.debug(
+            "Popularity score calculated",
+            listeners=listeners,
+            playcount=playcount,
+            base_popularity=base_popularity,
+            exploration_openness=exploration_openness,
+            final_score=final_score
+        )
+        
+        return final_score
     
-    def _calculate_base_popularity(self, playcount: int, listeners: int) -> float:
+    def _calculate_base_popularity(self, listeners: int, playcount: int) -> float:
         """Calculate base popularity score from play counts."""
         # Use log scale to handle wide range of play counts
         if playcount > 0:
@@ -329,22 +333,33 @@ class PopularityBalancer:
         # Combine play count and listener count
         return (playcount_score + listeners_score) / 2
     
-    def _adjust_for_exploration_preference(
-        self, 
-        popularity_score: float, 
-        exploration_openness: float
-    ) -> float:
-        """Adjust popularity score based on user's exploration preferences."""
+    def _is_genre_hybrid_query(self, entities: Dict[str, Any], intent_analysis: Dict[str, Any]) -> bool:
+        """
+        Detect if this is a genre-hybrid query that should be more tolerant of popular tracks.
         
-        if exploration_openness > 0.7:
-            # User likes underground music - reward lower popularity
-            return 1.0 - (popularity_score * 0.6)
-        elif exploration_openness < 0.3:
-            # User likes mainstream music - reward higher popularity
-            return popularity_score
-        else:
-            # Balanced preference - reward moderate popularity
-            return 1.0 - abs(popularity_score - 0.5) / 0.5
+        Genre-hybrid queries like "Music like Kendrick Lamar but jazzy" want good examples
+        of genre fusion, not just underground tracks.
+        """
+        if not entities or not intent_analysis:
+            return False
+            
+        musical_entities = entities.get('musical_entities', {})
+        if not musical_entities:
+            return False
+        
+        # Check for genre constraints
+        genres = musical_entities.get('genres', {})
+        has_genres = len(genres.get('primary', [])) > 0 or len(genres.get('secondary', [])) > 0
+        
+        # Check for artist similarity component 
+        has_artist_similarity = len(musical_entities.get('artists', [])) > 0
+        
+        # Check if it's a hybrid intent
+        intent_type = intent_analysis.get('primary_intent', '')
+        is_hybrid_intent = intent_type == 'hybrid' or 'hybrid' in str(intent_type).lower()
+        
+        # All conditions must be true for genre-hybrid query
+        return has_genres and has_artist_similarity and is_hybrid_intent
 
 
 class EngagementScorer:
@@ -730,14 +745,62 @@ class IntentAwareScorer:
             
             candidate_artist = candidate_data.get('artist', '').lower()
             
+            # 🔧 NEW: Artist alias mapping for better artist recognition
+            artist_aliases = {
+                'bon iver': ['justin vernon', 'bonnie bear'],
+                'justin vernon': ['bon iver', 'bonnie bear'],
+                'radiohead': ['thom yorke', 'jonny greenwood', 'ed o\'brien', 'colin greenwood', 'phil selway'],
+                'thom yorke': ['radiohead', 'atoms for peace'],
+                'taylor swift': ['taylor swift feat.', 'taylor swift featuring'],
+                'kanye west': ['ye', 'kanye', 'yeezy'],
+                'the weeknd': ['weeknd'],
+                'frank ocean': ['christopher francis ocean'],
+                'tyler the creator': ['tyler okonma', 'ace creator'],
+                'childish gambino': ['donald glover'],
+                'daniel caesar': ['daniel caesar feat.'],
+                'sza': ['solána imani rowe'],
+                'daft punk': ['thomas bangalter', 'guy-manuel de homem-christo'],
+                'lcd soundsystem': ['james murphy'],
+                'tame impala': ['kevin parker'],
+                'vampire weekend': ['ezra koenig'],
+                'arcade fire': ['win butler', 'régine chassagne'],
+                'fleet foxes': ['robin pecknold'],
+                'sufjan stevens': ['sufjan stevens feat.']
+            }
+            
             # Check if candidate is from target artist (highest similarity)
+            target_artists_lower = [artist.lower() for artist in target_artists]
+            
+            # Direct match
             if any(candidate_artist == artist.lower() for artist in target_artists):
                 similarity_score = 1.0
             else:
-                # Calculate style similarity based on genres/tags
-                similarity_score = self._calculate_style_similarity(
-                    candidate_data, target_artists, entities
-                )
+                # 🔧 NEW: Check for artist aliases
+                alias_match = False
+                for target_artist in target_artists_lower:
+                    # Check if target has aliases and candidate matches one
+                    if target_artist in artist_aliases:
+                        aliases = artist_aliases[target_artist]
+                        if candidate_artist in [alias.lower() for alias in aliases]:
+                            similarity_score = 1.0
+                            alias_match = True
+                            self.logger.info(f"🎯 SIMILARITY ALIAS MATCH: '{candidate_artist}' matches target '{target_artist}' via alias")
+                            break
+                    
+                    # Check reverse mapping
+                    if candidate_artist in artist_aliases:
+                        aliases = artist_aliases[candidate_artist]
+                        if target_artist in [alias.lower() for alias in aliases]:
+                            similarity_score = 1.0
+                            alias_match = True
+                            self.logger.info(f"🎯 REVERSE SIMILARITY ALIAS: '{candidate_artist}' is primary for target '{target_artist}'")
+                            break
+                
+                # If no alias match, calculate style similarity
+                if not alias_match:
+                    similarity_score = self._calculate_style_similarity(
+                        candidate_data, target_artists, entities
+                    )
             
             self.logger.debug(
                 "Similarity score calculated",
@@ -1127,7 +1190,11 @@ class ComprehensiveQualityScorer:
             )
             
             popularity_score = self.popularity_balancer.calculate_popularity_score(
-                track_data, intent_analysis
+                listeners=int(track_data.get('listeners', 0)),
+                playcount=int(track_data.get('playcount', 0)),
+                exploration_openness=intent_analysis.get('exploration_openness', 0.5),
+                entities=entities,
+                intent_analysis=intent_analysis
             )
             
             engagement_score = await self.engagement_scorer.calculate_engagement_score(
@@ -1387,7 +1454,11 @@ class ComprehensiveQualityScorer:
             )
             
             popularity_score = self.popularity_balancer.calculate_popularity_score(
-                track_data, intent_analysis
+                listeners=int(track_data.get('listeners', 0)),
+                playcount=int(track_data.get('playcount', 0)),
+                exploration_openness=intent_analysis.get('exploration_openness', 0.5),
+                entities=entities,
+                intent_analysis=intent_analysis
             )
             
             # Simplified engagement score (skip async calculation)

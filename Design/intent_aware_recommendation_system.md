@@ -6,7 +6,38 @@ Our current music recommendation system uses one-size-fits-all scoring that crea
 
 ## Core Query Types & Scoring Strategy
 
-### 1. Artist Similarity (`"Music like Mk.gee"`)
+### 1. By Artist (`"Music by Mk.gee"`, `"Give me tracks by Radiohead"`)
+
+**User Goal:** Find tracks by the specified artist (their discography)
+
+**Key Behavior:**
+- Include ONLY the target artist's own tracks
+- Exclude similar artists completely
+- Focus on artist's discography depth
+- Prioritize popular/quality tracks by that artist
+
+**Ideal Scoring Weights:**
+```python
+weights = {
+    'quality': 0.5,          # Most important - best tracks by artist
+    'popularity': 0.3,       # Favor well-known tracks by artist
+    'recency': 0.2          # Mix of old and new from artist
+}
+```
+
+**Scoring Modifications:**
+- **Quality >> Everything else** priority
+- Artist's own tracks get 100% artist match score
+- No similarity scoring needed (artist is specified)
+- May favor known/popular tracks over deep cuts
+- No novelty penalty for popular tracks
+
+**Agent Workflow:**
+- **Planner:** Sequence should be `['discovery', 'judge']` (discovery focuses on target artist)
+- **Discovery:** Exclusively target artist's tracks, multiple tracks per artist allowed
+- **Judge:** Quality and popularity focused scoring
+
+### 2. Artist Similarity (`"Music like Mk.gee"`)
 
 **User Goal:** Find artists that sound similar to the target artist
 
@@ -38,7 +69,7 @@ weights = {
 - **Genre/Mood:** Secondary validation of style consistency
 - **Judge:** Heavy weighting toward similarity scores
 
-### 2. Discovery/Exploration (`"Find me underground indie rock"`)
+### 3. Discovery/Exploration (`"Find me underground indie rock"`)
 
 **User Goal:** Discover truly new/unknown music
 
@@ -65,7 +96,7 @@ weights = {
 - **Discovery:** Strict novelty filtering, favor serendipitous sources
 - **Judge:** Heavy weighting toward novelty and underground scores
 
-### 3. Genre/Mood (`"Upbeat electronic music"`)
+### 4. Genre/Mood (`"Upbeat electronic music"`)
 
 **User Goal:** Find tracks matching specific vibes
 
@@ -90,7 +121,7 @@ weights = {
 - **Discovery:** Secondary validation, light novelty boost
 - **Judge:** Heavy weighting toward genre/mood scores
 
-### 4. Contextual (`"Music for studying"`, `"Workout playlist"`)
+### 5. Contextual (`"Music for studying"`, `"Workout playlist"`)
 
 **User Goal:** Functional music for specific activities
 
@@ -114,13 +145,13 @@ weights = {
 - **Genre/Mood:** Focus on audio features and contextual tags
 - **Judge:** Context-aware scoring, familiarity bonus
 
-### 5. Hybrid (`"Chill songs like Bon Iver"`, `"Underground indie rock"`, `"Jazzy music like Kendrick Lamar"`)
+### 6. Hybrid (`"Chill songs like Bon Iver"`, `"Underground indie rock"`, `"Jazzy music like Kendrick Lamar"`)
 
 **User Goal:** Intersection of multiple intents with different primary emphasis
 
 **Key Insight:** Hybrid queries are NOT one-size-fits-all. They need different scoring based on their primary intent:
 
-#### 5.1 Discovery-Primary Hybrid (`"Find me underground indie rock"`, `"New experimental electronic music"`)
+#### 6.1 Discovery-Primary Hybrid (`"Find me underground indie rock"`, `"New experimental electronic music"`)
 **Primary**: Discovery/Novelty | **Secondary**: Genre/Mood
 ```python
 weights = {
@@ -130,7 +161,7 @@ weights = {
 }
 ```
 
-#### 5.2 Similarity-Primary Hybrid (`"Music like Kendrick Lamar but jazzy"`, `"Chill songs like Bon Iver"`)
+#### 6.2 Similarity-Primary Hybrid (`"Music like Kendrick Lamar but jazzy"`, `"Chill songs like Bon Iver"`)
 **Primary**: Artist Similarity | **Secondary**: Genre/Mood
 ```python
 weights = {
@@ -140,7 +171,7 @@ weights = {
 }
 ```
 
-#### 5.3 Genre-Primary Hybrid (`"Upbeat indie rock with electronic elements"`, `"Dark ambient with jazz influences"`)
+#### 6.3 Genre-Primary Hybrid (`"Upbeat indie rock with electronic elements"`, `"Dark ambient with jazz influences"`)
 **Primary**: Genre/Mood | **Secondary**: Discovery
 ```python
 weights = {
@@ -166,6 +197,12 @@ weights = {
 ## Query Examples & Intent Classification
 
 ### Pure Intent Examples
+
+#### By Artist
+- `"Music by Mk.gee"` → Artist's own discography
+- `"Give me tracks by Radiohead"` → Artist's catalog focus
+- `"Play some Beatles songs"` → Beatles discography only
+- `"Mk.gee songs"` → Target artist tracks only
 
 #### Artist Similarity
 - `"Music like Mk.gee"` → Pure similarity focus
@@ -221,6 +258,11 @@ weights = {
 2. **Dynamic Scoring Weight Configuration**
    ```python
    INTENT_SCORING_WEIGHTS = {
+       'by_artist': {
+           'quality': 0.5,
+           'popularity': 0.3,
+           'recency': 0.2
+       },
        'artist_similarity': {
            'similarity': 0.6,
            'target_artist_boost': 0.2,
@@ -280,6 +322,7 @@ weights = {
 1. **Dynamic Agent Sequencing with Hybrid Sub-Types**
    ```python
    INTENT_AGENT_SEQUENCES = {
+       'by_artist': ['discovery', 'judge'],
        'artist_similarity': ['discovery', 'judge'],
        'discovery': ['discovery', 'judge'],
        'genre_mood': ['genre_mood', 'discovery', 'judge'],
@@ -402,6 +445,7 @@ def get_novelty_threshold(self, intent):
 ```python
 def get_diversity_limits(self, intent):
     limits = {
+        'by_artist': {'max_per_artist': 10, 'max_per_genre': 10},  # Allow many tracks from target artist
         'artist_similarity': {'max_per_artist': 3, 'max_per_genre': 5},
         'discovery': {'max_per_artist': 1, 'max_per_genre': 3},
         'genre_mood': {'max_per_artist': 2, 'max_per_genre': 8},
@@ -410,27 +454,3 @@ def get_diversity_limits(self, intent):
     }
     return limits.get(intent, {'max_per_artist': 1, 'max_per_genre': 3})
 ```
-
-## Success Criteria
-
-### Artist Similarity Queries
-- ✅ Target artist's tracks appear in top 3 results
-- ✅ Actually similar artists (DIJON, Jai Paul) rank higher than generic popular tracks
-- ✅ Similarity score correlation > 0.8 with user ratings
-
-### Discovery Queries  
-- ✅ >80% of results have <100k listeners
-- ✅ High novelty score distribution
-- ✅ Diverse genre/tag representation
-
-### Genre/Mood Queries
-- ✅ >90% genre accuracy
-- ✅ Consistent mood/energy levels
-- ✅ Audio feature alignment within target ranges
-
-### Contextual Queries
-- ✅ Functional fit for intended activity
-- ✅ Appropriate energy/tempo ranges
-- ✅ User retention/completion rates for context
-
-This design provides a clear path toward fixing the core issue: **matching system behavior to user intent** rather than forcing all queries through the same scoring pipeline. 

@@ -244,6 +244,7 @@ class SystemConfig(BaseModel):
 
 class QueryIntent(Enum):
     """Primary intent types for music queries."""
+    BY_ARTIST = "by_artist"                     # "Music by X" - focus on artist's own tracks
     ARTIST_SIMILARITY = "artist_similarity"      # "Music like X" - focus on similarity
     DISCOVERY = "discovery"                      # "Something new and different" - focus on novelty
     GENRE_MOOD = "genre_mood"                   # "Upbeat electronic music" - focus on style/vibe

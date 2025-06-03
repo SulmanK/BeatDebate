@@ -61,29 +61,34 @@ class QueryUnderstandingEngine:
 
 CRITICAL: Classify queries into these specific intent types based on the design document:
 
-1. ARTIST_SIMILARITY ("Music like [Artist]", "Similar to [Artist]")
-   - Focus on finding artists/tracks that sound similar
+1. BY_ARTIST ("Music by [Artist]", "Give me tracks by [Artist]", "[Artist] songs")
+   - Focus on finding tracks BY the specified artist
+   - User wants the artist's own discography/tracks
+
+2. ARTIST_SIMILARITY ("Music like [Artist]", "Similar to [Artist]", "Artists that sound like [Artist]")
+   - Focus on finding artists/tracks that sound similar to the target artist
+   - User wants OTHER artists that are similar, NOT the target artist's own tracks
    - Extract artist names EXACTLY as written (e.g., "Mk.gee", "BROCKHAMPTON", "!!!")
 
-2. DISCOVERY ("Find me underground indie rock", "Something new and different")
+3. DISCOVERY ("Find me underground indie rock", "Something new and different")
    - Focus on discovering truly new/unknown music
    - Emphasis on novelty and underground tracks
 
-3. GENRE_MOOD ("Upbeat electronic music", "Sad indie songs")
+4. GENRE_MOOD ("Upbeat electronic music", "Sad indie songs")
    - Focus on specific vibes, genres, or moods
    - No specific artist reference, just style/feel
 
-4. CONTEXTUAL ("Music for studying", "Workout playlist", "Road trip songs")
+5. CONTEXTUAL ("Music for studying", "Workout playlist", "Road trip songs")
    - Focus on functional music for specific activities
    - Context-driven recommendations
 
-5. HYBRID ("Chill songs like Bon Iver", "Upbeat music similar to Daft Punk")
+6. HYBRID ("Chill songs like Bon Iver", "Upbeat music similar to Daft Punk")
    - Combines artist similarity with mood/genre requirements
    - Both artist reference AND style/context requirements
 
 Return a JSON object with this exact structure:
 {
-    "intent": "artist_similarity|discovery|genre_mood|contextual|hybrid",
+    "intent": "by_artist|artist_similarity|discovery|genre_mood|contextual|hybrid",
     "musical_entities": {
         "artists": ["artist1", "artist2"],
         "genres": ["genre1", "genre2"], 
@@ -97,7 +102,11 @@ Return a JSON object with this exact structure:
 }
 
 EXAMPLES:
+- "Music by Mk.gee" → intent: "by_artist", artists: ["Mk.gee"]
+- "Give me tracks by Radiohead" → intent: "by_artist", artists: ["Radiohead"]
+- "Mk.gee songs" → intent: "by_artist", artists: ["Mk.gee"]
 - "Music like Mk.gee" → intent: "artist_similarity", artists: ["Mk.gee"]
+- "Artists similar to Radiohead" → intent: "artist_similarity", artists: ["Radiohead"]
 - "Find underground electronic music" → intent: "discovery", genres: ["electronic"]
 - "Happy music for working out" → intent: "contextual", moods: ["happy"], context_factors: ["workout"]
 - "Chill songs like Bon Iver" → intent: "hybrid", artists: ["Bon Iver"], moods: ["chill"]
@@ -334,6 +343,7 @@ Remember to return ONLY the JSON object with no additional text."""
             try:
                 # Map common intent values to valid enum values
                 intent_mapping = {
+                    'by_artist': 'by_artist',
                     'discovery': 'discovery',
                     'similarity': 'artist_similarity',
                     'artist_similarity': 'artist_similarity',
@@ -403,12 +413,48 @@ Remember to return ONLY the JSON object with no additional text."""
                     artists.extend(extract_names(artists_data))
             
             # ✅ FORCE ARTIST_SIMILARITY intent when artists found with similarity indicators
-            if artists and any(phrase in original_query.lower() for phrase in ['like', 'similar to', 'sounds like', 'reminds me of']):
+            # BUT NOT for hybrid queries that have additional genre/mood constraints
+            genres_found = []
+            if 'genres' in musical_entities:
+                genres_data = musical_entities['genres']
+                if isinstance(genres_data, dict):
+                    genres_found.extend(extract_names(genres_data.get('primary', [])))
+                    genres_found.extend(extract_names(genres_data.get('secondary', [])))
+                elif isinstance(genres_data, list):
+                    genres_found.extend(extract_names(genres_data))
+            
+            # Check for mood constraints too
+            moods_found = []
+            if 'moods' in musical_entities:
+                moods_data = musical_entities['moods']
+                if isinstance(moods_data, dict):
+                    moods_found.extend(extract_names(moods_data.get('primary', [])))
+                    moods_found.extend(extract_names(moods_data.get('secondary', [])))
+                    moods_found.extend(extract_names(moods_data.get('energy', [])))
+                    moods_found.extend(extract_names(moods_data.get('emotion', [])))
+                elif isinstance(moods_data, list):
+                    moods_found.extend(extract_names(moods_data))
+            
+            # FIXED: Only consider it a constraint if there are ACTUAL genres or moods
+            has_genre_mood_constraints = bool(genres_found) or bool(moods_found)
+            
+            if (artists and 
+                any(phrase in original_query.lower() for phrase in ['like', 'similar to', 'sounds like', 'reminds me of']) and
+                not has_genre_mood_constraints and  # 🎯 NEW: Don't override hybrid queries with constraints
+                intent != QueryIntent.HYBRID):  # 🎯 NEW: Don't override correctly detected hybrid intent
+                
                 intent = QueryIntent.ARTIST_SIMILARITY
                 # Set default similarity type for artist similarity if not already set
                 if similarity_type is None:
                     similarity_type = SimilarityType.STYLISTIC
-                self.logger.info("Detected artist similarity query, forcing ARTIST_SIMILARITY intent", artists=artists)
+                self.logger.info("Detected pure artist similarity query, forcing ARTIST_SIMILARITY intent", artists=artists)
+            elif (artists and has_genre_mood_constraints and
+                  any(phrase in original_query.lower() for phrase in ['like', 'similar to', 'sounds like', 'reminds me of'])):
+                # Keep as hybrid for queries like "Music like X but Y"
+                self.logger.info(f"🎯 HYBRID query detected: artist similarity + constraints (genres: {genres_found}, moods: {musical_entities.get('moods', [])})")
+                if intent != QueryIntent.HYBRID:
+                    intent = QueryIntent.HYBRID
+                    self.logger.info("🔧 Converted to HYBRID intent due to genre/mood constraints")
             
             # 🔧 NEW: Detect hybrid sub-types for better scoring
             hybrid_subtype = None
@@ -479,7 +525,8 @@ Remember to return ONLY the JSON object with no additional text."""
                 original_query=original_query,
                 normalized_query=original_query.lower().strip(),
                 reasoning=(f"Analysis completed with {confidence:.1%} confidence" + 
-                           (f" | Hybrid sub-type: {hybrid_subtype}" if hybrid_subtype else ""))
+                           (f" | Hybrid sub-type: {genres_found}" if genres_found else "") +
+                           (f" | Mood constraints: {has_genre_mood_constraints}" if has_genre_mood_constraints else ""))
             )
             
             return understanding

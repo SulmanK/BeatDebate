@@ -281,9 +281,7 @@ class GenreMoodAgent(BaseAgent):
                 scored_candidates.sort(key=lambda x: x.get('combined_score', 0), reverse=True)
             
             # Phase 3: Filter and rank by genre/mood relevance
-            filtered_candidates = await self._filter_by_genre_mood_relevance(
-                scored_candidates, entities, intent_analysis
-            )
+            filtered_candidates = await self._filter_by_genre_requirements(scored_candidates, entities, self.llm_client)
             
             # Apply diversity filtering
             # 🚀 Pass context override to diversity filtering
@@ -374,7 +372,8 @@ class GenreMoodAgent(BaseAgent):
         for genre in target_genres:
             try:
                 # Check if candidate matches this genre using our new API method
-                if await self._check_single_genre_match(candidate, genre):
+                match_result = await self._check_genre_match(candidate, genre)
+                if match_result.get('matches', False):
                     # Give high score for API-confirmed genre matches
                     score += 0.6  # Much higher than old 0.3
                     self.logger.debug(f"🎵 API-confirmed genre match: {candidate_artist} - {candidate_name} matches {genre}")
@@ -382,10 +381,10 @@ class GenreMoodAgent(BaseAgent):
             except Exception as e:
                 self.logger.debug(f"API genre matching failed, falling back to tag matching for {genre}: {e}")
                 # Fallback to simple tag matching if API fails
-                if any(genre.lower() in tag.lower() for tag in candidate_tags):
-                    score += 0.3
-                if genre.lower() in candidate_name or genre.lower() in candidate_artist:
-                    score += 0.2
+            if any(genre.lower() in tag.lower() for tag in candidate_tags):
+                score += 0.3
+            if genre.lower() in candidate_name or genre.lower() in candidate_artist:
+                score += 0.2
         
         # Score based on mood matching (keep existing logic)
         target_moods = self._extract_target_moods(entities, intent_analysis)
@@ -411,220 +410,89 @@ class GenreMoodAgent(BaseAgent):
         
         return min(score, 1.0)
     
-    async def _filter_by_genre_mood_relevance(
+    async def _filter_by_genre_requirements(
         self,
-        scored_candidates: List[Dict[str, Any]],
+        candidates: List[Dict[str, Any]], 
         entities: Dict[str, Any],
-        intent_analysis: Dict[str, Any]
+        llm_client=None
     ) -> List[Dict[str, Any]]:
-        """Enhanced genre filtering with strict mode for hybrid queries."""
-        
-        # 🔧 DEBUG: Log all input parameters for troubleshooting
-        primary_intent = intent_analysis.get('primary_intent')
-        regular_intent = intent_analysis.get('intent')
-        self.logger.info(f"🔧 DEBUG GENRE FILTERING: primary_intent={primary_intent}, intent={regular_intent}")
-        self.logger.info(f"🔧 DEBUG ENTITIES STRUCTURE: {entities}")
-        
-        # 🔧 NEW: Check if this is a hybrid query with genre filtering requirements
-        is_hybrid_with_genre = (
-            (intent_analysis.get('primary_intent') == 'hybrid' or intent_analysis.get('intent') == 'hybrid') and
-            self._has_genre_requirements(entities)
-        )
-        
-        self.logger.info(f"🔧 DEBUG: is_hybrid_with_genre={is_hybrid_with_genre}")
-        
-        if is_hybrid_with_genre:
-            self.logger.info("🎯 HYBRID QUERY WITH GENRE REQUIREMENTS: Using strict filtering")
-            return await self._strict_genre_filtering(scored_candidates, entities, intent_analysis)
-        else:
-            self.logger.debug("Using relaxed filtering for non-hybrid or non-genre query")
-            return await self._relaxed_genre_filtering(scored_candidates, entities, intent_analysis)
-
-    def _has_genre_requirements(self, entities: Dict[str, Any]) -> bool:
-        """Check if entities contain genre requirements."""
-        self.logger.debug(f"🔧 DEBUG: Checking genre requirements in entities: {entities}")
-        
-        # Try nested format first (musical_entities wrapper)
+        """Filter candidates based on genre requirements using enhanced batch processing."""
+        # Extract required genres
         musical_entities = entities.get('musical_entities', {})
-        genres_primary = musical_entities.get('genres', {}).get('primary')
-        if genres_primary:
-            self.logger.debug(f"🔧 DEBUG: Found genres in musical_entities.genres.primary: {genres_primary}")
-            return True
+        genres = musical_entities.get('genres', {})
+        required_genres = genres.get('primary', [])
         
-        # Try direct format
-        direct_genres = entities.get('genres', {}).get('primary')
-        if direct_genres:
-            self.logger.debug(f"🔧 DEBUG: Found genres in direct entities.genres.primary: {direct_genres}")
-            return True
-            
-        # Try simple list format
-        simple_genres = entities.get('genres')
-        if simple_genres and isinstance(simple_genres, list) and len(simple_genres) > 0:
-            self.logger.debug(f"🔧 DEBUG: Found genres in simple list format: {simple_genres}")
-            return True
+        if not required_genres:
+            self.logger.debug("No genre requirements found, keeping all candidates")
+            return candidates
         
-        self.logger.debug("🔧 DEBUG: No genre requirements found")
-        return False
-
-    async def _strict_genre_filtering(self, scored_candidates, entities, intent_analysis):
-        """Strict filtering for hybrid queries with genre requirements."""
+        self.logger.info(f"🎯 Filtering {len(candidates)} candidates for genres: {required_genres}")
         
-        required_genres = self._extract_required_genres_for_filtering(entities)
-        filtered = []
+        # For genre filtering, we require ALL primary genres to be matched
+        filtered_candidates = []
         
-        self.logger.info(f"🎯 STRICT GENRE FILTERING: Looking for {required_genres} tracks")
-        
-        for candidate in scored_candidates:
-            quality_score = candidate.get('quality_score', 0)
-            genre_mood_score = candidate.get('genre_mood_score', 0)
-            
-            # More reasonable quality threshold for hybrid queries
-            if quality_score < 0.25:  # Lowered from 0.4 to 0.25
-                self.logger.debug(f"❌ Strict quality filter: {candidate.get('name')} quality={quality_score:.3f} < 0.25")
-                continue
-                
-            # Strict genre matching required
-            if not await self._matches_required_genre(candidate, required_genres):
-                self.logger.debug(f"❌ Genre filter: {candidate.get('name')} doesn't match {required_genres}")
-                continue
-                
-            # Genre/mood score should be decent with our new API-based scoring
-            if genre_mood_score < 0.25:  # Lowered from 0.4 to be more inclusive
-                self.logger.debug(f"❌ Strict genre/mood filter: {candidate.get('name')} score={genre_mood_score:.3f} < 0.25")
-                continue
-                
-            self.logger.debug(f"✅ Passed strict filtering: {candidate.get('name')} quality={quality_score:.3f}, genre_mood={genre_mood_score:.3f}")
-            filtered.append(candidate)
-        
-        self.logger.info(f"🎯 Strict genre filtering: {len(scored_candidates)} → {len(filtered)} candidates")
-        return filtered
-
-    async def _relaxed_genre_filtering(self, scored_candidates, entities, intent_analysis):
-        """Relaxed filtering for non-hybrid queries (original logic)."""
-        filtered = []
-        
-        self.logger.debug(f"Filtering {len(scored_candidates)} candidates with quality_threshold={self.quality_threshold}")
-        
-        for i, candidate in enumerate(scored_candidates):
-            quality_score = candidate.get('quality_score', 0)
-            genre_mood_score = candidate.get('genre_mood_score', 0)
-            
-            self.logger.debug(
-                f"Candidate {i+1}: {candidate.get('name', 'Unknown')} by {candidate.get('artist', 'Unknown')}, "
-                f"quality={quality_score:.3f}, genre_mood={genre_mood_score:.3f}"
-            )
-            
-            # Very relaxed quality threshold for genre/mood agent
-            if quality_score < 0.2:  # Reduced from max(0.3, self.quality_threshold * 0.7)
-                self.logger.debug(f"Filtered out {candidate.get('name')}: quality too low ({quality_score:.3f} < 0.2)")
-                continue
-            
-            # Very relaxed genre/mood relevance check - accept almost anything
-            if genre_mood_score < 0.05:  # Reduced from 0.1 to 0.05
-                self.logger.debug(f"Filtered out {candidate.get('name')}: genre/mood score too low ({genre_mood_score:.3f} < 0.05)")
-                continue
-            
-            filtered.append(candidate)
-        
-        self.logger.info(f"Genre/mood filtering: {len(scored_candidates)} -> {len(filtered)} candidates")
-        return filtered
-
-    def _extract_required_genres_for_filtering(self, entities: Dict[str, Any]) -> List[str]:
-        """Extract required genres for strict filtering."""
-        required_genres = []
-        
-        # Try nested format first (musical_entities wrapper)
-        musical_entities = entities.get('musical_entities', {})
-        if musical_entities.get('genres', {}).get('primary'):
-            required_genres = musical_entities['genres']['primary']
-            self.logger.debug(f"🔧 DEBUG: Found genres in musical_entities: {required_genres}")
-        # Try direct format
-        elif entities.get('genres', {}).get('primary'):
-            required_genres = entities['genres']['primary']
-            self.logger.debug(f"🔧 DEBUG: Found genres in direct format: {required_genres}")
-        # Try simple list format
-        elif entities.get('genres') and isinstance(entities['genres'], list):
-            required_genres = entities['genres']
-            self.logger.debug(f"🔧 DEBUG: Found genres in list format: {required_genres}")
-        
-        # Convert to strings and clean up
-        if required_genres:
-            if isinstance(required_genres[0], dict):
-                # Handle structured format with name/confidence
-                required_genres = [genre['name'].lower().strip() for genre in required_genres if genre.get('name')]
-                self.logger.debug(f"🔧 DEBUG: Converted structured genres to strings: {required_genres}")
-            else:
-                required_genres = [str(genre).lower().strip() for genre in required_genres if genre]
-                self.logger.debug(f"🔧 DEBUG: Converted to strings: {required_genres}")
-        
-        self.logger.debug(f"🎯 Extracted required genres for filtering: {required_genres}")
-        return required_genres
-
-    async def _matches_required_genre(self, candidate: Dict, required_genres: List[str]) -> bool:
-        """Check if candidate matches any of the required genres using API service."""
         for genre in required_genres:
-            if await self._check_single_genre_match(candidate, genre):
-                return True
-        return False
-
-    async def _check_single_genre_match(self, candidate: Dict, target_genre: str) -> bool:
-        """Check if candidate matches a single genre using API service."""
-        try:
-            # Use our new API service method for genre checking
+            genre_matches = []
+            
+            # Prepare track data for batch processing
+            track_data = []
+            for candidate in candidates:
+                track_info = {
+                    'artist': candidate.get('artist', ''),
+                    'name': candidate.get('name', ''),
+                    'tags': candidate.get('tags', [])
+                }
+                track_data.append(track_info)
+            
+            # Use batch processing for genre matching
             from ...services.api_service import get_api_service
             api_service = get_api_service()
             
-            # Check track-level genre match
-            track_match = await api_service.check_track_genre_match(
-                artist=candidate.get('artist', ''),
-                track=candidate.get('name', ''),
-                target_genre=target_genre,
+            batch_results = await api_service.batch_check_tracks_genre_match(
+                tracks=track_data,
+                target_genre=genre,
+                llm_client=llm_client,  # Pass the LLM client for batch processing
                 include_related_genres=True
             )
             
-            if track_match['matches']:
-                self.logger.debug(
-                    f"✅ Genre match: {candidate.get('artist')} - {candidate.get('name')} matches {target_genre}",
-                    match_type=track_match['match_type'],
-                    confidence=track_match['confidence'],
-                    matched_tags=track_match['matched_tags']
-                )
-                return True
-            
-            self.logger.debug(
-                f"❌ No genre match: {candidate.get('artist')} - {candidate.get('name')} doesn't match {target_genre}",
-                track_tags=track_match.get('track_tags', []),
-                artist_tags=track_match.get('artist_match', {}).get('artist_tags', [])
-            )
-            return False
-            
-        except Exception as e:
-            self.logger.error(f"Genre matching failed: {e}")
-            # Fall back to simple tag matching
-            return self._fallback_genre_match(candidate, target_genre)
-    
-    def _fallback_genre_match(self, candidate: Dict, target_genre: str) -> bool:
-        """Fallback genre matching using simple tag comparison."""
-        try:
-            candidate_tags = candidate.get('tags', [])
-            candidate_name = candidate.get('name', '').lower()
-            candidate_artist = candidate.get('artist', '').lower()
-            
-            target_lower = target_genre.lower()
-            
-            # Check tags
-            if any(target_lower in tag.lower() for tag in candidate_tags):
-                return True
-            
-            # Check track name and artist name
-            if target_lower in candidate_name or target_lower in candidate_artist:
-                return True
+            # Apply results to candidates
+            for i, candidate in enumerate(candidates):
+                track_key = f"{candidate.get('artist', 'Unknown')} - {candidate.get('name', 'Unknown')}"
+                match_result = batch_results.get(track_key, {'matches': False})
                 
-            return False
+                if match_result['matches']:
+                    # Add match information to candidate
+                    candidate['genre_match'] = {
+                        'genre': genre,
+                        'confidence': match_result['confidence'],
+                        'matched_tags': match_result['matched_tags'],
+                        'match_type': match_result['match_type'],
+                        'explanation': match_result['explanation']
+                    }
+                    genre_matches.append(candidate)
+                    
+                    self.logger.debug(
+                        f"✅ Genre match: {candidate.get('artist')} - {candidate.get('name')} matches {genre}",
+                        match_type=match_result['match_type'],
+                        confidence=match_result['confidence'],
+                        matched_tags=match_result['matched_tags']
+                    )
+                else:
+                    self.logger.debug(
+                        f"❌ No genre match: {candidate.get('artist')} - {candidate.get('name')} doesn't match {genre}",
+                        track_tags=candidate.get('tags', [])
+                    )
             
-        except Exception as e:
-            self.logger.error(f"Fallback genre matching failed: {e}")
-            return False
+            self.logger.info(f"🎯 Genre filtering for '{genre}': {len(candidates)} → {len(genre_matches)} candidates")
+            
+            # Update candidates for next genre (intersection)
+            candidates = genre_matches
+            
+            if not candidates:
+                break  # No candidates left
+        
+        self.logger.info(f"🎯 Final genre filtering: {len(filtered_candidates)} → {len(candidates)} candidates")
+        return candidates
     
     def _ensure_diversity(self, candidates: List[Dict[str, Any]], entities: Dict[str, Any], intent_analysis: Dict[str, Any], context_override: Dict[str, Any] = None) -> List[Dict[str, Any]]:
         """Ensure diversity in artists and sources."""
@@ -634,6 +502,14 @@ class GenreMoodAgent(BaseAgent):
         # 🚀 Apply context override constraints for followup intents
         max_tracks_per_artist = 1  # Default strict diversity
         target_artist_from_override = None
+        
+        # 🎯 NEW: Check for by_artist intent first
+        intent = intent_analysis.get('intent', '').lower()
+        if intent == 'by_artist':
+            # For by_artist queries like "Music by Kendrick Lamar", allow many tracks from target artist
+            max_tracks_per_artist = 10  # Allow up to 10 tracks from the target artist
+            total_limit = min(self.final_recommendations * 2, 30)  # Allow more total tracks
+            self.logger.info(f"🎯 BY_ARTIST intent detected: allowing {max_tracks_per_artist} tracks per artist")
         
         if context_override:
             # Handle both dictionary and object formats
@@ -653,7 +529,7 @@ class GenreMoodAgent(BaseAgent):
                 max_tracks_per_artist = 10  # Increased from 5 to 10 for better artist deep dives
                 self.logger.info(f"🚀 GenreMood Context override: allowing up to {max_tracks_per_artist} tracks from target artist '{target_artist_from_override}'")
         
-        # 🎯 NEW: Check if this is a genre-specific query that should have relaxed diversity
+        # 🎯 Check if this is a genre-specific query that should have relaxed diversity
         is_genre_specific_query = (
             self._has_genre_requirements(entities) and 
             (intent_analysis.get('intent') == 'hybrid' or intent_analysis.get('primary_intent') == 'hybrid')
@@ -661,11 +537,11 @@ class GenreMoodAgent(BaseAgent):
         
         if is_genre_specific_query:
             # For genre-specific queries, allow more tracks per artist to focus on genre quality
-            max_tracks_per_artist = 5  # Allow multiple tracks from same artist
+            max_tracks_per_artist = max(max_tracks_per_artist, 5)  # Use max to not override by_artist
             total_limit = min(self.final_recommendations * 4, 50)  # Allow more total tracks
             self.logger.info(f"🎯 Genre-specific query detected: relaxed diversity - {max_tracks_per_artist} per artist, max {total_limit} total")
-        else:
-            # Standard diversity for non-genre queries
+        elif intent != 'by_artist':
+            # Standard diversity for non-genre, non-by_artist queries
             total_limit = self.final_recommendations * 2
         
         self.logger.info(f"🔧 DEBUG: GenreMood diversity filtering with {len(candidates)} candidates, max per artist: {max_tracks_per_artist}")
@@ -840,6 +716,11 @@ class GenreMoodAgent(BaseAgent):
         
         return list(set(target_genres))  # Remove duplicates
     
+    def _has_genre_requirements(self, entities: Dict[str, Any]) -> bool:
+        """Check if the query has specific genre requirements."""
+        target_genres = self._extract_target_genres(entities)
+        return len(target_genres) > 0
+    
     def _extract_target_moods(self, entities: Dict[str, Any], intent_analysis: Dict[str, Any]) -> List[str]:
         """Extract target moods from entities and intent analysis."""
         moods = []
@@ -1008,4 +889,4 @@ class GenreMoodAgent(BaseAgent):
                 'track_tags': [],
                 'artist_match': {'matches': False},
                 'match_type': 'error'
-            } 
+        } 

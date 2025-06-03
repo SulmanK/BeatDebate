@@ -62,17 +62,23 @@ class RankingLogic:
             
             # Use provided parameters or get defaults
             if novelty_threshold is None:
-                novelty_threshold = self.get_novelty_threshold(intent)
-            if scoring_weights is None:
-                scoring_weights = self.get_intent_weights(intent)
+                base_novelty_threshold = self.get_novelty_threshold(intent)
+                
+                # 🎯 NEW: Adjust for genre-hybrid queries
+                if self.is_genre_hybrid_query(entities, intent_analysis):
+                    novelty_threshold = 0.0  # Disable novelty filtering - users want BEST examples of genre fusion
+                    self.logger.info(f"🎯 Detected genre-hybrid query - DISABLED novelty filtering (threshold: {novelty_threshold})")
+                else:
+                    novelty_threshold = base_novelty_threshold
             
-            self.logger.info(
-                "🔧 Ranking with intent-aware scoring",
+            if scoring_weights is None:
+                scoring_weights = self.get_intent_weights(intent, entities, intent_analysis)
+            
+            self.logger.info(f"🔧 Ranking with intent-aware scoring", 
+                            candidate_count=len(candidates),
                 intent=intent,
-                novelty_threshold=novelty_threshold,
                 scoring_weights=scoring_weights,
-                candidate_count=len(candidates)
-            )
+                            novelty_threshold=novelty_threshold)
             
             ranked_candidates = []
             
@@ -298,8 +304,50 @@ class RankingLogic:
         # Convert to lowercase for comparison
         target_artists_lower = [artist.lower() for artist in target_artists]
         
-        if candidate.artist.lower() in target_artists_lower:
+        # 🔧 NEW: Artist alias mapping for common cases
+        artist_aliases = {
+            'bon iver': ['justin vernon', 'bonnie bear'],
+            'justin vernon': ['bon iver', 'bonnie bear'],
+            'radiohead': ['thom yorke', 'jonny greenwood', 'ed o\'brien', 'colin greenwood', 'phil selway'],
+            'thom yorke': ['radiohead', 'atoms for peace'],
+            'taylor swift': ['taylor swift feat.', 'taylor swift featuring'],
+            'kanye west': ['ye', 'kanye', 'yeezy'],
+            'the weeknd': ['weeknd'],
+            'frank ocean': ['christopher francis ocean'],
+            'tyler the creator': ['tyler okonma', 'ace creator'],
+            'childish gambino': ['donald glover'],
+            'daniel caesar': ['daniel caesar feat.'],
+            'sza': ['solána imani rowe'],
+            'daft punk': ['thomas bangalter', 'guy-manuel de homem-christo'],
+            'lcd soundsystem': ['james murphy'],
+            'tame impala': ['kevin parker'],
+            'vampire weekend': ['ezra koenig'],
+            'arcade fire': ['win butler', 'régine chassagne'],
+            'fleet foxes': ['robin pecknold'],
+            'sufjan stevens': ['sufjan stevens feat.']
+        }
+
+        candidate_artist_lower = candidate.artist.lower()
+
+        # Direct match
+        if candidate_artist_lower in target_artists_lower:
             return 1.0  # Maximum boost for target artist's tracks
+        
+        # 🔧 NEW: Check aliases
+        for target_artist_lower in target_artists_lower:
+            if target_artist_lower in artist_aliases:
+                aliases = artist_aliases[target_artist_lower]
+                if candidate_artist_lower in [alias.lower() for alias in aliases]:
+                    self.logger.info(f"🎯 ARTIST ALIAS MATCH: '{candidate.artist}' matches target '{target_artist_lower}' via alias")
+                    return 1.0  # Maximum boost for alias match
+                    
+            # Also check reverse mapping (candidate could be the primary name)
+            if candidate_artist_lower in artist_aliases:
+                aliases = artist_aliases[candidate_artist_lower]
+                if target_artist_lower in [alias.lower() for alias in aliases]:
+                    self.logger.info(f"🎯 REVERSE ALIAS MATCH: '{candidate.artist}' is primary for target '{target_artist_lower}'")
+                    return 1.0  # Maximum boost for reverse alias match
+
         return 0.0
     
     def _apply_underground_bonus(self, candidate: TrackRecommendation) -> float:
@@ -657,6 +705,26 @@ class RankingLogic:
                 'novelty': 0.1
             },
             
+            # 🔧 NEW: Hybrid sub-type specific weights
+            'hybrid_similarity_primary': {
+                'similarity': 0.5,           # Primary focus - artist similarity
+                'target_artist_boost': 0.2,  # Important - boost target artist tracks
+                'genre_mood_match': 0.2,     # Secondary - style modifier
+                'quality': 0.1               # Basic quality threshold
+            },
+            'hybrid_discovery_primary': {
+                'novelty': 0.5,              # Primary focus - underground music
+                'genre_mood_match': 0.3,     # Secondary - genre accuracy
+                'quality': 0.15,             # Basic quality
+                'similarity': 0.05           # Minimal similarity component
+            },
+            'hybrid_genre_primary': {
+                'genre_mood_match': 0.5,     # Primary focus - style accuracy
+                'novelty': 0.25,             # Secondary - some discovery
+                'quality': 0.2,              # Good quality
+                'similarity': 0.05           # Minimal similarity component
+            },
+            
             # Legacy compatibility - map old intents to new weights
             'similarity': {  # Maps to artist_similarity
                 'similarity': 0.6,
@@ -759,28 +827,85 @@ class RankingLogic:
         } 
     
     def get_novelty_threshold(self, intent: str) -> float:
-        """Get novelty threshold based on intent with hybrid sub-type support."""
-        
+        """Get novelty threshold based on intent type."""
         thresholds = {
-            'artist_similarity': 0.15,           # Very relaxed
-            'discovery': 0.4,                    # Moderately strict (was 0.6 - too strict!)
-            'genre_mood': 0.3,                   # Moderate
-            'contextual': 0.2,                   # Relaxed
-            'hybrid': 0.25,                      # Moderate (default hybrid)
-            
-            # 🔧 NEW: Hybrid sub-type specific thresholds
-            'hybrid_discovery_primary': 0.4,     # Moderately strict (was 0.6 - too strict!)
-            'hybrid_similarity_primary': 0.25,   # Relaxed - similarity focus  
-            'hybrid_genre_primary': 0.35,        # Moderate - balanced approach
+            'discovery': 0.6,
+            'similarity': 0.3,
+            'genre_mood': 0.5,
+            'hybrid': 0.4,
+            'exploration': 0.7
         }
         
-        threshold = thresholds.get(intent, 0.4)  # Default fallback
-        self.logger.debug(f"Novelty threshold for '{intent}': {threshold}")
-        return threshold
+        # Extract base intent if it's a hybrid sub-type
+        base_intent = intent.split('_')[0] if '_' in intent else intent
+        return thresholds.get(base_intent, 0.4)
+
+    def is_genre_hybrid_query(self, entities: Dict[str, Any], intent_analysis: Dict[str, Any]) -> bool:
+        """
+        Detect queries asking for specific genre combinations/influences.
+        
+        These queries typically want good examples of genre fusion, not just underground tracks.
+        Example: "Music like Kendrick Lamar but jazzy"
+        
+        IMPORTANT: This should ONLY trigger for queries that have BOTH:
+        1. Artist similarity requests AND
+        2. Explicit genre/mood modifiers
+        """
+        if not entities or not intent_analysis:
+            self.logger.debug("🎯 Genre-hybrid check: Missing entities or intent_analysis")
+            return False
+        
+        # Check intent type first - look for hybrid patterns
+        intent = intent_analysis.get('intent', '')
+        self.logger.debug(f"🎯 Genre-hybrid check: Intent = '{intent}'")
+        
+        # Get musical entities
+        musical_entities = entities.get('musical_entities', {})
+        if not musical_entities:
+            self.logger.debug("🎯 Genre-hybrid check: No musical entities")
+            return False
+        
+        # Check if there are artists (similarity component)
+        artists = musical_entities.get('artists', {})
+        has_artists = (
+            len(artists.get('primary', [])) > 0 or 
+            len(artists.get('similar_to', [])) > 0
+        )
+        
+        # Check for EXPLICIT genre/mood constraints (the hybrid component)
+        genres = musical_entities.get('genres', {})
+        moods = musical_entities.get('moods', {})
+        
+        has_explicit_genres = (
+            len(genres.get('primary', [])) > 0 or 
+            len(genres.get('secondary', [])) > 0
+        )
+        
+        has_explicit_moods = (
+            len(moods.get('primary', [])) > 0 or 
+            len(moods.get('secondary', [])) > 0
+        )
+        
+        # STRICT REQUIREMENT: Must have BOTH artists AND explicit genre/mood modifiers
+        is_genre_hybrid = has_artists and (has_explicit_genres or has_explicit_moods)
+        
+        self.logger.debug(f"🎯 Genre-hybrid check: has_artists={has_artists}, has_explicit_genres={has_explicit_genres}, has_explicit_moods={has_explicit_moods}, result={is_genre_hybrid}")
+        
+        if is_genre_hybrid:
+            self.logger.debug("🎯 Genre-hybrid check: DETECTED - query has both artist similarity AND explicit genre/mood constraints")
+            return True
+        else:
+            self.logger.debug("🎯 Genre-hybrid check: NOT DETECTED - pure similarity or discovery query")
+            return False
     
     def get_diversity_limits(self, intent: str) -> Dict[str, Any]:
         """Get intent-specific diversity limits."""
         limits = {
+            'by_artist': {
+                'max_per_artist': 10,   # 🎯 NEW: Allow many tracks from target artist  
+                'max_per_genre': 10,    # Allow genre variety from same artist
+                'min_genres': 1         # No genre diversity requirement
+            },
             'artist_similarity': {
                 'max_per_artist': 5,    # 🔧 INCREASED: Allow more tracks from target artist
                 'max_per_genre': 8, 
@@ -818,70 +943,45 @@ class RankingLogic:
         }
         return limits.get(intent, {'max_per_artist': 2, 'max_per_genre': 4, 'min_genres': 3})
     
-    def get_intent_weights(self, intent: str) -> Dict[str, float]:
-        """Get scoring weights based on intent with hybrid sub-type support."""
+    def get_intent_weights(self, intent: str, entities: Dict[str, Any] = None, intent_analysis: Dict[str, Any] = None) -> Dict[str, float]:
+        """Get scoring weights based on intent type with genre-hybrid adjustments."""
         
-        # 🔧 NEW: Handle hybrid sub-types with different scoring priorities
-        if intent.startswith('hybrid_'):
-            # Use specific hybrid sub-type weights
-            hybrid_weights = {
-                'hybrid_discovery_primary': {
-                    'novelty': 0.5,           # Most important - truly underground
-                    'genre_mood_match': 0.4,  # Important - genre accuracy  
-                    'quality': 0.1           # Basic threshold
-                },
-                'hybrid_similarity_primary': {
-                    'similarity': 0.5,        # Most important - artist similarity
-                    'genre_mood_match': 0.3,  # Important - style modifier
-                    'quality': 0.2           # Good quality baseline
-                },
-                'hybrid_genre_primary': {
-                    'genre_mood_match': 0.6,  # Most important - style accuracy
-                    'novelty': 0.25,         # Secondary - some discovery
-                    'quality': 0.15          # Basic quality
-                }
+        # Check if this is a genre-hybrid query first
+        if entities and intent_analysis and self.is_genre_hybrid_query(entities, intent_analysis):
+            # For genre-hybrid queries, focus on genre matching and quality, not novelty
+            self.logger.info("🎯 Using genre-hybrid optimized weights (novelty=0)")
+            return {
+                'similarity': 0.35,           # Slightly reduced 
+                'genre_mood_match': 0.45,     # Increased - most important for genre fusion
+                'quality': 0.20,              # Increased - want high quality examples
+                'novelty': 0.0                # Disabled - popularity doesn't matter for genre fusion
             }
-            
-            if intent in hybrid_weights:
-                weights = hybrid_weights[intent]
-                self.logger.debug(f"🔧 Using {intent} weights: {weights}")
+        
+        # 🔧 FIXED: Use the initialized ranking weights instead of hard-coded dictionary
+        # This allows access to hybrid_similarity_primary and other sub-type weights
+        ranking_weights = self.ranking_weights
+        
+        # First try to get exact intent match (including hybrid sub-types)
+        if intent in ranking_weights:
+            weights = ranking_weights[intent]
+            self.logger.debug(f"Found exact intent weights for '{intent}': {weights}")
+            return weights
+        
+        # Fallback to base intent for hybrid sub-types
+        if '_' in intent:
+            base_intent = intent.split('_')[0]
+            if base_intent in ranking_weights:
+                weights = ranking_weights[base_intent]
+                self.logger.debug(f"Using base intent weights for '{intent}' -> '{base_intent}': {weights}")
                 return weights
-            else:
-                self.logger.warning(f"Unknown hybrid sub-type: {intent}, using default hybrid weights")
-                intent = 'hybrid'  # Fallback to default hybrid
         
-        # Original intent-specific weights
-        intent_weights = {
-            'artist_similarity': {
-                'similarity': 0.6,
-                'target_artist_boost': 0.2,
-                'quality': 0.15,
-                'novelty': 0.05
-            },
-            'discovery': {
-                'novelty': 0.5,
-                'underground': 0.3,
-                'quality': 0.15,
-                'similarity': 0.05
-            },
-            'genre_mood': {
-                'genre_mood_match': 0.6,
-                'quality': 0.25,
-                'novelty': 0.15
-            },
-            'contextual': {
-                'context_fit': 0.6,
-                'quality': 0.25,
-                'familiarity': 0.15
-            },
-            'hybrid': {
-                'similarity': 0.4,
-                'genre_mood_match': 0.35,
-                'quality': 0.15,
-                'novelty': 0.1
-            }
-        }
+        # Final fallback to hybrid weights
+        weights = ranking_weights.get('hybrid', {
+            'similarity': 0.4,
+            'genre_mood_match': 0.35,
+            'quality': 0.15,
+            'novelty': 0.1
+        })
         
-        weights = intent_weights.get(intent, intent_weights['hybrid'])
-        self.logger.debug(f"Intent weights for '{intent}': {weights}")
+        self.logger.debug(f"Using fallback weights for '{intent}': {weights}")
         return weights 

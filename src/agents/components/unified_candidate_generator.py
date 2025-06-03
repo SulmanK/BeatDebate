@@ -181,34 +181,6 @@ class UnifiedCandidateGenerator:
                 target_genres=target_genres
             )
             
-            # 🔧 FIX: For artist similarity queries, include target artist's own tracks
-            intent = intent_analysis.get('intent', '')
-            if intent == 'artist_similarity' and seed_artists:
-                self.logger.info(f"Artist similarity detected - including tracks by target artists: {seed_artists}")
-                for artist in seed_artists[:3]:  # Increased from 2 to 3 artists
-                    try:
-                        artist_tracks = await self.api_service.get_artist_top_tracks(
-                            artist=artist,
-                            limit=15  # Increased from 10 for more target artist tracks
-                        )
-                        
-                        for track_metadata in artist_tracks:
-                            track = self._convert_metadata_to_dict(
-                                track_metadata,
-                                source='target_artist_tracks',
-                                source_confidence=0.95,  # High confidence for target artist
-                                target_artist=artist
-                            )
-                            all_candidates.append(track)
-                            
-                        self.logger.info(f"Added {len(artist_tracks)} tracks by target artist: {artist}")
-                        
-                    except Exception as e:
-                        self.logger.warning(
-                            f"Failed to get tracks by target artist '{artist}'", 
-                            error=str(e)
-                        )
-            
             # Source 1: Multi-hop Similarity
             similarity_candidates = await self._get_multi_hop_similarity_tracks(
                 seed_artists, entities, intent_analysis,
@@ -964,16 +936,49 @@ class UnifiedCandidateGenerator:
         
         all_candidates = []
         
-        if intent == 'artist_similarity':
-            # Strategy: Include target artist tracks + similar artists
+        if intent == 'by_artist':
+            # Strategy: Include ONLY target artist's own tracks
             if agent_type == "discovery":
-                # Focus on similar artists and target artist's own tracks
+                # Focus exclusively on the target artist's discography
                 all_candidates.extend(
                     await self._generate_target_artist_tracks(entities)
                 )
+                # Add additional tracks by the same artist if needed
+                target_artists = self._extract_seed_artists(entities)
+                if target_artists:
+                    for artist in target_artists[:2]:
+                        try:
+                            # Get more deep cuts from the artist
+                            additional_tracks = await self.api_service.get_artist_top_tracks(
+                                artist=artist,
+                                limit=20  # Get more tracks for by_artist queries
+                            )
+                            for track_metadata in additional_tracks:
+                                track = self._convert_metadata_to_dict(
+                                    track_metadata,
+                                    source='by_artist_deep_cuts',
+                                    source_confidence=0.9,
+                                    target_artist=artist
+                                )
+                                all_candidates.append(track)
+                        except Exception as e:
+                            self.logger.warning(f"Failed to get additional tracks by {artist}: {e}")
+            elif agent_type == "genre_mood":
+                # Support with artist-focused tracks organized by style
+                all_candidates.extend(
+                    await self._generate_target_artist_tracks(entities)
+                )
+        
+        elif intent == 'artist_similarity':
+            # Strategy: Focus on similar artists only (NOT target artist's own tracks)
+            if agent_type == "discovery":
+                # Focus ONLY on similar artists - users want "music LIKE artist", not "music BY artist"
                 all_candidates.extend(
                     await self._get_similar_artist_tracks(entities)
                 )
+                # Add some genre exploration to broaden the similarity search
+                similar_style_tracks = await self._get_genre_exploration_tracks(entities, {}, limit=15)
+                all_candidates.extend(similar_style_tracks)
             elif agent_type == "genre_mood":
                 # Support with style-consistent tracks
                 all_candidates.extend(

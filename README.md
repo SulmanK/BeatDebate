@@ -2,6 +2,8 @@
 
 **Multi-Agent Music Recommendation System for AgentX Competition**
 
+> **🌟 [Try BeatDebate Live on HuggingFace Spaces](https://huggingface.co/spaces/YOUR_USERNAME/beatdebate)** | **🏆 [AgentX Competition](https://rdi.berkeley.edu/agentx/)** | **📂 [GitHub Repository](https://github.com/SulmanK/BeatDebate)**
+
 BeatDebate is a sophisticated music recommendation system that uses 4 specialized AI agents to discover under-the-radar tracks through intelligent debate and strategic planning. Built for the AgentX competition, it demonstrates advanced agentic planning behavior in a real-world application.
 
 ## 🎯 Key Features
@@ -13,7 +15,17 @@ BeatDebate is a sophisticated music recommendation system that uses 4 specialize
 - **Explainable AI**: `JudgeAgent` provides transparent reasoning for each recommendation, linking back to the planning strategy.
 - **Conversational Interface**: A Gradio-based UI allows for natural language interaction and displays rich track information.
 - **Contextual Conversations**: `SmartContextManager` and `ContextAwareIntentAnalyzer` enable multi-turn dialogues.
+- **Agent Reasoning Display**: See the complete multi-agent planning and decision-making process in real-time.
 - **$0 Cost Goal**: Built leveraging free tiers (Gemini, Last.fm, Spotify API access, HuggingFace for hosting).
+
+## 🚀 Live Demo
+
+### 🌟 Try It Now: [BeatDebate on HuggingFace Spaces](https://huggingface.co/spaces/YOUR_USERNAME/beatdebate)
+
+Experience the power of multi-agent AI planning for music discovery! The live demo includes:
+- **Agent Reasoning Viewer**: Watch how the 4 agents collaborate and make decisions
+- **Example Queries**: Try different types of music discovery intents
+- **Real-time Planning**: See strategic planning in action for the AgentX competition
 
 ## 🏗️ Architecture
 
@@ -208,14 +220,184 @@ You: "More Mk.gee tracks, but make them more electronic"
 🎵 Results: Mk.gee tracks that lean electronic, or similar artists known for that specific fusion.
 ```
 
+## 🚀 Deployment
+
+### HuggingFace Spaces (Live Demo)
+
+**🌟 [Access the live demo here](https://huggingface.co/spaces/YOUR_USERNAME/beatdebate)**
+
+BeatDebate is deployed as a public HuggingFace Space, showcasing advanced agentic planning behavior for the AgentX competition. The deployment features:
+
+- **Public Access**: Try the system without any setup or API keys
+- **Agent Reasoning Display**: See how the 4 agents collaborate through strategic planning
+- **Competition Integration**: Direct links to AgentX competition and project documentation
+- **Real-time Interaction**: Experience multi-agent music discovery in your browser
+
+## 📋 HuggingFace Spaces Deployment Checklist
+
+Ready to deploy BeatDebate to HuggingFace Spaces? Follow this step-by-step guide:
+
+### Step 1: Create HuggingFace Space
+1. **Go to [HuggingFace Spaces](https://huggingface.co/new-space)**
+2. **Configure Space Settings**:
+   - **Space Name**: `beatdebate` (or your preferred name)
+   - **License**: `mit`
+   - **SDK**: `gradio`
+   - **Python Version**: `3.11`
+   - **Visibility**: `public`
+3. **Set Space Title**: 
+   ```
+   BeatDebate: A Multi-Agent System with Strategic Planning for Explainable Music Recommendation
+   ```
+4. **Add Description**:
+   ```
+   Multi-agent AI system showcasing strategic planning for music discovery. 
+   Features 4 specialized agents collaborating through LangGraph workflow. 
+   Built for AgentX competition demonstrating advanced agentic behavior.
+   ```
+
+### Step 2: Upload Core Files
+Upload these files to your HuggingFace Space:
+
+**Required Files**:
+- ✅ `app.py` - HuggingFace Spaces entry point
+- ✅ `requirements.txt` - Generated dependencies
+- ✅ `README.md` - Updated with Spaces info
+- ✅ `pyproject.toml` - Project configuration
+
+**Required Directories**:
+- ✅ `src/` - Complete source code directory
+- ✅ `Design/` - Design documents (optional but helpful)
+- ✅ `.env.example` - Environment template
+
+**Optional Files** (recommended):
+- ✅ `logging.conf` - Logging configuration
+- ✅ `.gitignore` - Git ignore patterns
+
+### Step 3: Configure API Key Secrets
+In your Space settings, add these secrets:
+
+**Required Secrets**:
+- 🔑 `GEMINI_API_KEY` - Your Google Gemini API key
+- 🔑 `LASTFM_API_KEY` - Your Last.fm API key
+- 🔑 `SPOTIFY_CLIENT_ID` - Your Spotify Client ID
+- 🔑 `SPOTIFY_CLIENT_SECRET` - Your Spotify Client Secret
+
+**Optional Secrets**:
+- 🔑 `LASTFM_SHARED_SECRET` - Last.fm shared secret (for advanced features)
+
+**How to Add Secrets**:
+1. Go to your Space settings
+2. Click "Repository secrets"
+3. Add each secret with the exact name listed above
+4. Paste your API key values (never commit these to code!)
+
+### Step 4: Update Space URL in README
+Replace `YOUR_USERNAME/beatdebate` with your actual HuggingFace Space URL:
+```bash
+# Find and replace in README.md:
+YOUR_USERNAME/beatdebate → your-hf-username/your-space-name
+```
+
+### Step 5: Verify Deployment
+Once uploaded, your Space should automatically build and deploy:
+
+**Check These Items**:
+- ✅ Space builds without errors (check logs)
+- ✅ All 4 agents initialize properly
+- ✅ API connections work (Gemini, Last.fm, Spotify)
+- ✅ Chat interface loads correctly
+- ✅ Agent reasoning display shows planning process
+- ✅ Example queries work as expected
+
+### Step 6: Competition Integration
+Ensure your Space showcases AgentX competition requirements:
+
+**Agentic Planning Features**:
+- ✅ **Strategic Planning**: PlannerAgent creates comprehensive strategies
+- ✅ **Multi-Agent Coordination**: 4 agents collaborate based on plans
+- ✅ **Reasoning Transparency**: Complete reasoning logs visible
+- ✅ **Real-World Application**: Functional music discovery system
+
+**Competition Links**:
+- ✅ [AgentX Competition](https://rdi.berkeley.edu/agentx/) link in header
+- ✅ [GitHub Repository](https://github.com/SulmanK/BeatDebate) link in header
+- ✅ Agent reasoning viewer showcases planning behavior
+
+### 🎯 Quick API Key Setup Guide
+
+**Get Gemini API Key** (Free):
+1. Go to [Google AI Studio](https://aistudio.google.com/)
+2. Click "Get API Key" → "Create API Key"
+3. Copy the key and add as `GEMINI_API_KEY` secret
+
+**Get Last.fm API Key** (Free):
+1. Go to [Last.fm API](https://www.last.fm/api/account/create)
+2. Create an account and get your API key
+3. Add as `LASTFM_API_KEY` secret
+
+**Get Spotify API Keys** (Free):
+1. Go to [Spotify Developer Dashboard](https://developer.spotify.com/dashboard)
+2. Create a new app
+3. Copy Client ID and Client Secret
+4. Add as `SPOTIFY_CLIENT_ID` and `SPOTIFY_CLIENT_SECRET` secrets
+
+### 🚨 Troubleshooting Common Issues
+
+**Build Fails**:
+- Check requirements.txt for dependency conflicts
+- Verify Python 3.11 is selected
+- Check logs for specific error messages
+
+**Import Errors**:
+- Ensure all source files are uploaded
+- Check that `src/` directory structure is maintained
+- Verify `app.py` imports work correctly
+
+**API Connection Fails**:
+- Double-check all API key secrets are set correctly
+- Verify secret names match exactly (case-sensitive)
+- Test API keys work outside of Spaces
+
+**Agents Don't Initialize**:
+- Check Gemini API key is valid and has quota
+- Verify environment variables are accessible
+- Review startup logs for specific agent errors
+
+### Local Development
+
+For local development and testing:
+
+```bash
+# Start the backend and frontend (FastAPI runs on port 8000, Gradio on 7860 by default)
+uv run python -m src.main
+```
+
+Alternatively, for hot-reloading of the FastAPI backend during development:
+```bash
+# Terminal 1: Start FastAPI backend
+uv run uvicorn src.api.backend:app --host 127.0.0.1 --port 8000 --reload
+
+# Terminal 2: Start Gradio UI (pointing to the backend)
+# (Ensure your chat_interface.py is configured to use http://127.0.0.1:8000 if run separately)
+# Or simply run the main `uv run python -m src.main` which handles both.
+```
+
 ## 🏆 AgentX Competition
 
-BeatDebate demonstrates sophisticated **agentic planning behavior** for the AgentX competition:
+BeatDebate demonstrates sophisticated **agentic planning behavior** for the [AgentX competition](https://rdi.berkeley.edu/agentx/):
 
 - **Strategic Planning**: `PlannerAgent` creates comprehensive, LLM-driven recommendation strategies.
 - **Agent Coordination**: Structured communication via `MusicRecommenderState` and targeted strategies.
 - **Reasoning Transparency**: `reasoning_log` in `MusicRecommenderState` and explanations from `JudgeAgent`.
 - **Technical Innovation**: Novel application of multi-agent planning to music recommendation, including intent-aware logic and context management.
+- **Live Demonstration**: [Public HuggingFace Space](https://huggingface.co/spaces/YOUR_USERNAME/beatdebate) showcasing real-time agent collaboration.
+
+### Competition Features
+- **Agent Reasoning Viewer**: Watch the planning process unfold in real-time
+- **Multi-Agent Coordination**: See how agents collaborate based on strategic plans
+- **Explainable AI**: Transparent decision-making with full reasoning logs
+- **Real-World Application**: Functional music discovery with immediate practical value
 
 ## 📊 Technical Details
 
@@ -244,26 +426,6 @@ BeatDebate demonstrates sophisticated **agentic planning behavior** for the Agen
 - **Spotify Web API**: Secondary source for audio previews and potentially audio features (though full audio feature integration for scoring is a future enhancement). Accessed via `SpotifyClient`.
 - **Text Embeddings (Future Enhancement)**: Design allows for future integration of sentence transformers for semantic search (e.g., with ChromaDB), but current MVP focuses on API-driven metadata and LLM reasoning.
 
-## 🚀 Deployment
-
-### HuggingFace Spaces
-The application is structured for easy deployment to HuggingFace Spaces. The `src.main:create_gradio_app()` function is the entry point for Spaces.
-
-### Local Development
-```bash
-# Start the backend and frontend (FastAPI runs on port 8000, Gradio on 7860 by default)
-uv run python -m src.main
-```
-Alternatively, for hot-reloading of the FastAPI backend during development:
-```bash
-# Terminal 1: Start FastAPI backend
-uv run uvicorn src.api.backend:app --host 127.0.0.1 --port 8000 --reload
-
-# Terminal 2: Start Gradio UI (pointing to the backend)
-# (Ensure your chat_interface.py is configured to use http://127.0.0.1:8000 if run separately)
-# Or simply run the main `uv run python -m src.main` which handles both.
-```
-
 ## 🤝 Contributing
 
 1.  **Fork the repository.**
@@ -284,5 +446,4 @@ MIT License - see LICENSE file for details.
 
 - **Primary Design Document**: `Design/Plans/beatdebate-design-doc.md`
 - **AgentX Course**: [LLM Agents Learning @ Stanford](https://llmagents-learning.org/sp25)
-- **HuggingFace Space**: [Coming Soon]
-```
+- **HuggingFace Space**: [BeatDebate Live Demo](https://huggingface.co/spaces/YOUR_USERNAME/beatdebate)

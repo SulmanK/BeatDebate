@@ -7,7 +7,6 @@ Phase 3 implementation.
 """
 
 import asyncio
-import logging
 import os
 import threading
 import time
@@ -15,7 +14,6 @@ from typing import Optional
 
 import gradio as gr
 import uvicorn
-from fastapi import FastAPI
 from dotenv import load_dotenv
 
 # Load environment variables from .env file
@@ -201,7 +199,7 @@ def main():
         app = create_app()
         
         # Check if running in HuggingFace Spaces
-        is_spaces = os.getenv("SPACE_ID") is not None
+        is_spaces = is_running_in_spaces()
         
         app.launch(
             share=not is_spaces,  # Don't create public links in Spaces
@@ -215,6 +213,11 @@ def main():
         raise
 
 
+def is_running_in_spaces() -> bool:
+    """Check if running in HuggingFace Spaces environment."""
+    return os.getenv("SPACE_ID") is not None or os.getenv("HF_SPACE_NAME") is not None
+
+
 # HuggingFace Spaces compatibility
 def create_gradio_app() -> gr.Blocks:
     """
@@ -226,19 +229,24 @@ def create_gradio_app() -> gr.Blocks:
     Returns:
         Gradio Blocks interface
     """
-    logger.info("Creating Gradio app for HuggingFace Spaces")
+    logger.info("🚀 Creating BeatDebate for HuggingFace Spaces")
     
-    # For Spaces, we'll run everything in the same process
-    # The backend will be started automatically via the lifespan manager
+    # Enhanced Spaces environment detection
+    if is_running_in_spaces():
+        space_id = os.getenv("SPACE_ID", os.getenv("HF_SPACE_NAME", "Unknown"))
+        logger.info(f"🌟 Running in HuggingFace Spaces: {space_id}")
+    
+    # Backend configuration for Spaces
     backend_url = "http://127.0.0.1:8000"
     
-    # Start backend in background thread
+    # Start backend with Spaces-optimized settings
     def start_backend_for_spaces():
         config = uvicorn.Config(
             app=fastapi_app,
             host="127.0.0.1",
             port=8000,
-            log_level="info"
+            log_level="info",
+            access_log=False  # Reduce log noise in Spaces
         )
         server = uvicorn.Server(config)
         asyncio.run(server.serve())
@@ -246,11 +254,14 @@ def create_gradio_app() -> gr.Blocks:
     backend_thread = threading.Thread(target=start_backend_for_spaces, daemon=True)
     backend_thread.start()
     
-    # Wait a moment for backend to start
-    time.sleep(2)
+    # Wait for backend to be ready (slightly longer for Spaces)
+    time.sleep(3)
     
-    # Create and return the Gradio interface
-    return create_chat_interface(backend_url)
+    # Create Gradio interface with Spaces-specific configurations
+    interface = create_chat_interface(backend_url)
+    
+    logger.info("✅ BeatDebate ready for HuggingFace Spaces deployment")
+    return interface
 
 
 if __name__ == "__main__":

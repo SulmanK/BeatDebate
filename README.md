@@ -2,7 +2,7 @@
 
 **Multi-Agent Music Recommendation System for AgentX Competition**
 
-> **🌟 [Try BeatDebate Live on HuggingFace Spaces](https://huggingface.co/spaces/YOUR_USERNAME/beatdebate)** | **🏆 [AgentX Competition](https://rdi.berkeley.edu/agentx/)** | **📂 [GitHub Repository](https://github.com/SulmanK/BeatDebate)**
+> **🌟 [Try BeatDebate Live on HuggingFace Spaces](https://huggingface.co/spaces/SulmanK/BeatDebate)** | **🏆 [AgentX Competition](https://rdi.berkeley.edu/agentx/)** | **📂 [GitHub Repository](https://github.com/SulmanK/BeatDebate)**
 
 BeatDebate is a sophisticated music recommendation system that uses 4 specialized AI agents to discover under-the-radar tracks through intelligent debate and strategic planning. Built for the AgentX competition, it demonstrates advanced agentic planning behavior in a real-world application.
 
@@ -16,11 +16,10 @@ BeatDebate is a sophisticated music recommendation system that uses 4 specialize
 - **Conversational Interface**: A Gradio-based UI allows for natural language interaction and displays rich track information.
 - **Contextual Conversations**: `SmartContextManager` and `ContextAwareIntentAnalyzer` enable multi-turn dialogues.
 - **Agent Reasoning Display**: See the complete multi-agent planning and decision-making process in real-time.
-- **$0 Cost Goal**: Built leveraging free tiers (Gemini, Last.fm, Spotify API access, HuggingFace for hosting).
 
 ## 🚀 Live Demo
 
-### 🌟 Try It Now: [BeatDebate on HuggingFace Spaces](https://huggingface.co/spaces/YOUR_USERNAME/beatdebate)
+### 🌟 Try It Now: [BeatDebate on HuggingFace Spaces](https://huggingface.co/spaces/SulmanK/BeatDebate)
 
 Experience the power of multi-agent AI planning for music discovery! The live demo includes:
 - **Agent Reasoning Viewer**: Watch how the 4 agents collaborate and make decisions
@@ -224,7 +223,7 @@ You: "More Mk.gee tracks, but make them more electronic"
 
 ### HuggingFace Spaces (Live Demo)
 
-**🌟 [Access the live demo here](https://huggingface.co/spaces/YOUR_USERNAME/beatdebate)**
+**🌟 [Access the live demo here](https://huggingface.co/spaces/SulmanK/BeatDebate)**
 
 BeatDebate is deployed as a public HuggingFace Space, showcasing advanced agentic planning behavior for the AgentX competition. The deployment features:
 
@@ -391,7 +390,7 @@ BeatDebate demonstrates sophisticated **agentic planning behavior** for the [Age
 - **Agent Coordination**: Structured communication via `MusicRecommenderState` and targeted strategies.
 - **Reasoning Transparency**: `reasoning_log` in `MusicRecommenderState` and explanations from `JudgeAgent`.
 - **Technical Innovation**: Novel application of multi-agent planning to music recommendation, including intent-aware logic and context management.
-- **Live Demonstration**: [Public HuggingFace Space](https://huggingface.co/spaces/YOUR_USERNAME/beatdebate) showcasing real-time agent collaboration.
+- **Live Demonstration**: [Public HuggingFace Space](https://huggingface.co/spaces/SulmanK/BeatDebate) showcasing real-time agent collaboration.
 
 ### Competition Features
 - **Agent Reasoning Viewer**: Watch the planning process unfold in real-time
@@ -446,4 +445,4 @@ MIT License - see LICENSE file for details.
 
 - **Primary Design Document**: `Design/Plans/beatdebate-design-doc.md`
 - **AgentX Course**: [LLM Agents Learning @ Stanford](https://llmagents-learning.org/sp25)
-- **HuggingFace Space**: [BeatDebate Live Demo](https://huggingface.co/spaces/YOUR_USERNAME/beatdebate)
+- **HuggingFace Space**: [BeatDebate Live Demo](https://huggingface.co/spaces/SulmanK/BeatDebate)

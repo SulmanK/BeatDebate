@@ -51,8 +51,8 @@ class UnifiedCandidateGenerator:
             },
             'discovery': {
                 'multi_hop_similarity': 30,  # Reduced from 50
-                'underground_detection': 15, # Reduced from 30
-                'serendipitous_discovery': 10 # Reduced from 20
+                'underground_detection': 15,  # Reduced from 30
+                'serendipitous_discovery': 10  # Reduced from 20
             }
         }
         
@@ -64,7 +64,8 @@ class UnifiedCandidateGenerator:
         intent_analysis: Dict[str, Any],
         agent_type: str = "genre_mood",
         target_candidates: Optional[int] = None,
-        detected_intent: str = None
+        detected_intent: str = None,
+        recently_shown_track_ids: List[str] = None
     ) -> List[Dict[str, Any]]:
         """
         Generate candidate pool using specified strategy.
@@ -75,6 +76,7 @@ class UnifiedCandidateGenerator:
             agent_type: "genre_mood" or "discovery" for strategy selection
             target_candidates: Override default target candidate count
             detected_intent: Specific intent for enhanced candidate generation
+            recently_shown_track_ids: List of recently shown track IDs to avoid duplicates
             
         Returns:
             List of candidate tracks with source metadata
@@ -82,11 +84,17 @@ class UnifiedCandidateGenerator:
         if target_candidates:
             self.target_candidates = target_candidates
             
+        # 🚨 CRITICAL FIX: Store recently shown tracks for duplicate avoidance
+        self.recently_shown_track_ids = recently_shown_track_ids or []
+        if self.recently_shown_track_ids:
+            self.logger.info(f"🚫 DUPLICATE AVOIDANCE: Excluding {len(self.recently_shown_track_ids)} recently shown tracks")
+            
         self.logger.info(
             "Starting unified candidate generation",
             agent_type=agent_type,
             target_candidates=self.target_candidates,
-            detected_intent=detected_intent
+            detected_intent=detected_intent,
+            excluded_tracks=len(self.recently_shown_track_ids)
         )
         
         # 🚀 PHASE 2: Intent-aware candidate generation strategy
@@ -651,6 +659,17 @@ class UnifiedCandidateGenerator:
         self, all_candidates: List[Dict[str, Any]], generation_type: str
     ) -> List[Dict[str, Any]]:
         """Finalize candidate list with deduplication and metadata."""
+        
+        # 🚨 CRITICAL FIX: Filter out recently shown tracks FIRST
+        if hasattr(self, 'recently_shown_track_ids') and self.recently_shown_track_ids:
+            pre_filter_count = len(all_candidates)
+            all_candidates = self._filter_recently_shown_tracks(all_candidates)
+            post_filter_count = len(all_candidates)
+            filtered_count = pre_filter_count - post_filter_count
+            
+            if filtered_count > 0:
+                self.logger.info(f"🚫 FILTERED {filtered_count} recently shown tracks ({pre_filter_count} → {post_filter_count})")
+        
         # Remove duplicates while preserving source information
         unique_candidates = self._deduplicate_candidates(all_candidates)
         
@@ -671,6 +690,34 @@ class UnifiedCandidateGenerator:
         )
         
         return final_candidates
+    
+    def _filter_recently_shown_tracks(self, candidates: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """Filter out tracks that were recently shown to the user."""
+        if not self.recently_shown_track_ids:
+            return candidates
+            
+        filtered_candidates = []
+        filtered_count = 0
+
+        for candidate in candidates:
+            # Create track identifier to match against recently shown
+            # Handle both 'name' and 'title' fields to match conversation history format
+            artist = candidate.get('artist', '').lower().strip()
+            track_name = (candidate.get('title') or candidate.get('name', '')).lower().strip()
+            track_id = f"{artist}::{track_name}"
+            
+            if track_id not in self.recently_shown_track_ids:
+                filtered_candidates.append(candidate)
+            else:
+                filtered_count += 1
+                display_name = candidate.get('title') or candidate.get('name', 'Unknown')
+                display_artist = candidate.get('artist', 'Unknown')
+                self.logger.info(f"🚫 EXCLUDED recently shown: {display_name} by {display_artist}")
+
+        if filtered_count > 0:
+            self.logger.info(f"🚫 FILTERED: Removed {filtered_count} recently shown tracks from {len(candidates)} candidates")
+        
+        return filtered_candidates
     
     def _convert_metadata_to_dict(
         self, 
@@ -706,8 +753,30 @@ class UnifiedCandidateGenerator:
         artists = musical_entities.get("artists", {})
         
         # Primary and similar-to artists
-        seed_artists.extend(artists.get("primary", []))
-        seed_artists.extend(artists.get("similar_to", []))
+        primary_artists = artists.get("primary", [])
+        similar_artists = artists.get("similar_to", [])
+
+        # 🚨 CRITICAL FIX: Filter out invalid artist names like "this", "that", "these"
+        invalid_artist_names = {'this', 'that', 'these', 'those', 'it', 'them'}
+
+        for artist in primary_artists:
+            artist_name = str(artist).strip().lower()
+            if artist_name not in invalid_artist_names and len(artist_name) > 1:
+                seed_artists.append(str(artist).strip())
+
+        for artist in similar_artists:
+            artist_name = str(artist).strip().lower()
+            if artist_name not in invalid_artist_names and len(artist_name) > 1:
+                seed_artists.append(str(artist).strip())
+
+        # 🔧 DEBUG: Log filtering results
+        if any(str(artist).strip().lower() in invalid_artist_names for artist in primary_artists + similar_artists):
+            filtered_out = [str(artist) for artist in primary_artists + similar_artists
+                            if str(artist).strip().lower() in invalid_artist_names]
+            remaining = [str(artist) for artist in primary_artists + similar_artists
+                         if str(artist).strip().lower() not in invalid_artist_names]
+            self.logger.info(f"🚨 FILTERED OUT invalid artist names: {filtered_out}")
+            self.logger.info(f"🎯 REMAINING valid artist names: {remaining}")
         
         # Fallback artists if none found
         if not seed_artists:
@@ -969,6 +1038,19 @@ class UnifiedCandidateGenerator:
                     await self._generate_target_artist_tracks(entities)
                 )
         
+        elif intent == 'by_artist_underground':
+            # 🔧 NEW: Strategy for underground tracks by specific artist
+            if agent_type == "discovery":
+                # Get target artist's FULL discography and select least popular tracks
+                all_candidates.extend(
+                    await self._generate_artist_underground_tracks(entities)
+                )
+            elif agent_type == "genre_mood":
+                # Support with underground style tracks
+                all_candidates.extend(
+                    await self._generate_underground_gems(entities)
+                )
+        
         elif intent == 'artist_similarity':
             # Strategy: Focus on similar artists only (NOT target artist's own tracks)
             if agent_type == "discovery":
@@ -1049,6 +1131,42 @@ class UnifiedCandidateGenerator:
                     await self._generate_hybrid_style_tracks(entities)
                 )
         
+        elif intent == 'hybrid_artist_genre':
+            # 🎯 NEW: Strategy for hybrid artist+genre queries (e.g., "Songs by Michael Jackson that are R&B")
+            # This should behave like 'by_artist' to generate target artist tracks,
+            # which will then be genre-filtered by the Discovery Agent
+            self.logger.info(f"🎯 HYBRID ARTIST+GENRE: Generating tracks for genre-filtered artist query")
+            if agent_type == "discovery":
+                # Focus exclusively on the target artist's discography
+                all_candidates.extend(
+                    await self._generate_target_artist_tracks(entities)
+                )
+                # Add additional tracks by the same artist if needed
+                target_artists = self._extract_seed_artists(entities)
+                if target_artists:
+                    for artist in target_artists[:2]:
+                        try:
+                            # Get more deep cuts from the artist for genre filtering
+                            additional_tracks = await self.api_service.get_artist_top_tracks(
+                                artist=artist,
+                                limit=30  # Get more tracks for genre filtering
+                            )
+                            for track_metadata in additional_tracks:
+                                track = self._convert_metadata_to_dict(
+                                    track_metadata,
+                                    source='hybrid_artist_genre_tracks',
+                                    source_confidence=0.9,
+                                    target_artist=artist
+                                )
+                                all_candidates.append(track)
+                        except Exception as e:
+                            self.logger.warning(f"Failed to get additional tracks by {artist}: {e}")
+            elif agent_type == "genre_mood":
+                # Support with artist-focused tracks organized by style
+                all_candidates.extend(
+                    await self._generate_target_artist_tracks(entities)
+                )
+
         # Fallback to default generation if no intent-specific candidates
         if not all_candidates:
             self.logger.warning(f"No intent-specific candidates for {intent}, falling back to default")
@@ -1062,39 +1180,74 @@ class UnifiedCandidateGenerator:
         return unique_candidates[:self.target_candidates]
     
     async def _generate_target_artist_tracks(self, entities: Dict[str, Any]) -> List[Dict[str, Any]]:
-        """Generate tracks by the target artist for artist similarity queries."""
-        tracks = []
-        
+        """Generate diverse tracks for target artist using multiple strategies."""
+        candidates = []
+        artists = self._extract_seed_artists(entities)
+
+        if not artists:
+            return candidates
+
+        primary_artist = artists[0]
+        self.logger.info(f"🎯 ENHANCED ARTIST GENERATION: Generating diverse tracks for {primary_artist}")
+
+        # Strategy 1: Direct artist tracks (existing logic)
+        direct_tracks = await self.api_service.get_artist_top_tracks(primary_artist, limit=30)
+        if direct_tracks:
+            for track_metadata in direct_tracks:
+                candidate_dict = self._convert_metadata_to_dict(
+                    track_metadata,
+                    source="artist_top_tracks",
+                    source_confidence=0.9
+                )
+                candidates.append(candidate_dict)
+
+        self.logger.info(f"🎯 Strategy 1 (direct): {len(direct_tracks)} tracks from {primary_artist}")
+
+        # Strategy 2: Similar artists → their top tracks
         try:
-            target_artists = self._extract_seed_artists(entities)
-            
-            for artist in target_artists[:2]:  # Limit to avoid too many tracks
-                try:
-                    artist_tracks = await self.api_service.get_artist_top_tracks(
-                        artist=artist,
-                        limit=15  # Increased from 10 for more target artist tracks
+            similar_artists = await self.api_service.get_similar_artists(primary_artist, limit=5)
+            for similar_artist in similar_artists[:3]:  # Top 3 similar artists
+                similar_tracks = await self.api_service.get_artist_top_tracks(similar_artist.name, limit=10)
+                for track_metadata in similar_tracks[:5]:  # 5 tracks per similar artist
+                    candidate_dict = self._convert_metadata_to_dict(
+                        track_metadata,
+                        source="similar_artist_tracks",
+                        source_confidence=0.7,
+                        similar_to_artist=primary_artist
                     )
-                    
-                    for track_metadata in artist_tracks:
-                        track = self._convert_metadata_to_dict(
-                            track_metadata,
-                            source='target_artist_tracks',
-                            source_confidence=0.95,
-                            target_artist=artist
-                        )
-                        tracks.append(track)
-                        
-                except Exception as e:
-                    self.logger.warning(
-                        f"Failed to get tracks by target artist '{artist}'", 
-                        error=str(e)
-                    )
-                    continue
-                    
+                    candidates.append(candidate_dict)
+
+            self.logger.info(f"🎯 Strategy 2 (similar artists): {len([c for c in candidates if c.get('source') == 'similar_artist_tracks'])} tracks")
         except Exception as e:
-            self.logger.error("Target artist tracks generation failed", error=str(e))
+            self.logger.warning(f"Similar artist strategy failed: {e}")
+
+        # Strategy 3: Artist tags → tracks from those tags
+        try:
+            artist_info = await self.api_service.get_artist_info(primary_artist)
+            if hasattr(artist_info, 'tags') and artist_info.tags:
+                # Get top 2 most relevant tags
+                top_tags = artist_info.tags[:2]
+                for tag in top_tags:
+                    # Use the correct API method
+                    tag_tracks = await self.api_service.search_by_tags([tag], limit=8)
+                    for track_metadata in tag_tracks[:4]:  # 4 tracks per tag
+                        # 🚨 CRITICAL FIX: Only include tracks by the target artist
+                        if track_metadata.artist.lower().strip() == primary_artist.lower().strip():
+                            candidate_dict = self._convert_metadata_to_dict(
+                                track_metadata,
+                                source="artist_tag_expansion",
+                                source_confidence=0.6,
+                                tag_source=tag
+                            )
+                            candidates.append(candidate_dict)
+
+                tag_expansion_count = len([c for c in candidates if c.get('source') == 'artist_tag_expansion'])
+                self.logger.info(f"🎯 Strategy 3 (tag expansion): {tag_expansion_count} tracks")
+        except Exception as e:
+            self.logger.warning(f"Tag expansion strategy failed: {e}")
         
-        return tracks[:20]  # Limit to 20 tracks
+        self.logger.info(f"🎯 TOTAL ARTIST CANDIDATES: {len(candidates)} tracks for {primary_artist}")
+        return candidates
     
     async def _generate_style_consistent_tracks(self, entities: Dict[str, Any]) -> List[Dict[str, Any]]:
         """Generate tracks that match the style of target artists."""
@@ -1151,4 +1304,67 @@ class UnifiedCandidateGenerator:
 
     async def _generate_genre_focused_discovery(self, entities: Dict[str, Any]) -> List[Dict[str, Any]]:
         """Generate genre-focused discovery tracks."""
-        return await self._get_genre_exploration_tracks(entities, {}, limit=15) 
+        return await self._get_genre_exploration_tracks(entities, {}, limit=15)
+
+    async def _generate_artist_underground_tracks(self, entities: Dict[str, Any]) -> List[Dict[str, Any]]:
+        """Generate underground tracks by the target artist."""
+        tracks = []
+        
+        try:
+            target_artists = self._extract_seed_artists(entities)
+            self.logger.info(f"🎵 Getting underground tracks for artists: {target_artists}")
+            
+            for artist in target_artists[:2]:  # Limit to avoid too many tracks
+                try:
+                    # Get MORE tracks from the artist to have a larger pool to filter from
+                    artist_tracks = await self.api_service.get_artist_top_tracks(
+                        artist=artist,
+                        limit=50  # 🔧 Get up to 50 tracks to have a good pool for underground filtering
+                    )
+                    
+                    if not artist_tracks:
+                        self.logger.warning(f"No tracks found for artist: {artist}")
+                        continue
+                    
+                    # 🔧 SORT BY POPULARITY (ASCENDING) - least popular first
+                    # Filter tracks that have popularity data first
+                    tracks_with_popularity = []
+                    for track_metadata in artist_tracks:
+                        playcount = getattr(track_metadata, 'playcount', 0) or 0
+                        listeners = getattr(track_metadata, 'listeners', 0) or 0
+                        
+                        # Calculate popularity score (lower = more underground)
+                        popularity_score = (playcount + listeners * 10)  # Simple popularity metric
+                        
+                        track = self._convert_metadata_to_dict(
+                            track_metadata,
+                            source='artist_underground_tracks',
+                            source_confidence=0.95,
+                            target_artist=artist
+                        )
+                        track['popularity_score'] = popularity_score
+                        tracks_with_popularity.append(track)
+                    
+                    # 🔧 SORT BY POPULARITY (ASCENDING) - least popular tracks first
+                    tracks_with_popularity.sort(key=lambda x: x.get('popularity_score', 0))
+                    
+                    # 🔧 Take the 10-20 LEAST popular tracks (the underground ones)
+                    underground_tracks = tracks_with_popularity[:20]  # Take bottom 20 tracks
+                    
+                    self.logger.info(f"🎵 Found {len(underground_tracks)} underground tracks for {artist}")
+                    for i, track in enumerate(underground_tracks[:5]):  # Log first 5 for debugging
+                        self.logger.info(f"  {i+1}. {track.get('name')} - popularity: {track.get('popularity_score', 0)}")
+                    
+                    tracks.extend(underground_tracks)
+                         
+                except Exception as e:
+                    self.logger.warning(
+                        f"Failed to get underground tracks by target artist '{artist}'", 
+                        error=str(e)
+                    )
+                    continue
+                     
+        except Exception as e:
+            self.logger.error("Artist underground tracks generation failed", error=str(e))
+         
+        return tracks[:20]  # Limit to 20 tracks total 

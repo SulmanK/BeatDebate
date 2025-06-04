@@ -81,11 +81,27 @@ class DiscoveryAgent(BaseAgent):
         
         # Intent-specific parameter configurations from design document
         self.intent_parameters = {
+            'by_artist': {
+                'novelty_threshold': 0.0,     # 🔧 NEW: No novelty filtering for by_artist
+                'quality_threshold': 0.25,    # Moderate quality for artist discography
+                'underground_bias': 0.0,      # No underground bias for by_artist
+                'similarity_depth': 1,        # Simple matching for target artist
+                'max_per_artist': 20,         # Allow many tracks from target artist
+                'candidate_focus': 'target_artist_discography'
+            },
+            'by_artist_underground': {
+                'novelty_threshold': 0.6,     # 🔧 NEW: High novelty filtering for underground tracks
+                'quality_threshold': 0.15,    # Lower quality threshold for underground gems
+                'underground_bias': 0.8,      # Strong underground bias
+                'similarity_depth': 1,        # Simple matching for target artist
+                'max_per_artist': 20,         # Allow many tracks from target artist
+                'candidate_focus': 'target_artist_deep_cuts'
+            },
             'artist_similarity': {
                 'novelty_threshold': 0.15,    # Very relaxed for similar artists
-                'quality_threshold': 0.4,     # Higher quality focus
-                'underground_bias': 0.3,      # Less underground bias
-                'similarity_depth': 3,        # Deeper similarity exploration
+                'quality_threshold': 0.2,     # Lower quality for broader similarity search
+                'underground_bias': 0.1,      # Slight underground preference
+                'similarity_depth': 2,        # Deep similarity search
                 'max_per_artist': 3,          # Allow more tracks per similar artist
                 'candidate_focus': 'similar_artists'
             },
@@ -198,9 +214,13 @@ class DiscoveryAgent(BaseAgent):
                     )
                     
                     # Override detected intent for followup queries
-                    if intent_override in ['artist_deep_dive', 'artist_similarity']:
-                        intent_analysis['intent'] = 'artist_similarity'
-                        self.logger.info(f"🎯 Overriding intent to 'artist_similarity' for {intent_override}: {target_artist_from_override}")
+                    if intent_override in ['artist_deep_dive', 'artist_similarity', 'hybrid_artist_genre']:
+                        if intent_override == 'hybrid_artist_genre':
+                            intent_analysis['intent'] = 'by_artist'  # Use by_artist logic but preserve genre filtering
+                            self.logger.info(f"🎯 Hybrid artist+genre follow-up: {target_artist_from_override} with preserved genre filters")
+                        else:
+                            intent_analysis['intent'] = 'artist_similarity'
+                            self.logger.info(f"🎯 Overriding intent to 'artist_similarity' for {intent_override}: {target_artist_from_override}")
                     elif intent_override == 'artist_style_refinement':
                         # 🔧 NEW: Artist-style refinement handling
                         intent_analysis['intent'] = 'hybrid'  # Treat as hybrid with artist + style constraints
@@ -247,6 +267,8 @@ class DiscoveryAgent(BaseAgent):
                     detected_intent = 'artist_similarity'
                 elif context_override.intent_override == 'artist_style_refinement':
                     detected_intent = 'hybrid'
+                elif context_override.intent_override == 'hybrid_artist_genre':
+                    detected_intent = 'hybrid_artist_genre'  # 🎯 NEW: Use hybrid_artist_genre for candidate generation
             
             # 🔧 CRITICAL FIX: For similarity-primary hybrids, treat as artist_similarity for candidate generation
             candidate_generation_intent = detected_intent
@@ -281,13 +303,50 @@ class DiscoveryAgent(BaseAgent):
             # 🚀 PHASE 2: Adapt agent parameters based on detected intent
             self._adapt_to_intent(detected_intent)
             
+            # 🔧 ENHANCED CANDIDATE SCALING: Adapt based on query type and expected duplicate rate
+            base_target_candidates = self.target_candidates  # Original 100
+            recently_shown_count = len(state.recently_shown_track_ids or [])
+            
+            # 🎯 ENHANCED STATE LOGGING: Log what we received from workflow state
+            self.logger.info(f"🎯 DISCOVERY AGENT STATE: recently_shown={recently_shown_count} tracks")
+            if state.recently_shown_track_ids:
+                sample_ids = state.recently_shown_track_ids[:3]
+                self.logger.info(f"🎯 SAMPLE RECENTLY SHOWN: {sample_ids}")
+            
+            # Scale up for follow-up queries to avoid candidate bottlenecks
+            if recently_shown_count > 0:
+                # 🚨 AGGRESSIVE SCALING for artist follow-ups (high duplicate probability)
+                if candidate_generation_intent in ['artist_similarity', 'by_artist']:
+                    # Calculate expected duplicate rate for same-artist queries
+                    if target_artist_from_override:
+                        # Same artist follow-up - expect high duplicates, scale aggressively
+                        duplicate_rate_estimate = min(0.8, recently_shown_count / 15)  # Cap at 80%
+                        needed_multiplier = int(1 / (1 - duplicate_rate_estimate)) + 2  # +2 safety margin
+                        scaled_target_candidates = max(300, recently_shown_count * needed_multiplier)
+                        self.logger.info(f"🚨 HIGH-DUPLICATE ARTIST SCALING: Expected {duplicate_rate_estimate:.1%} duplicates, scaling to {scaled_target_candidates} candidates")
+                    else:
+                        scaled_target_candidates = max(200, recently_shown_count * 15) 
+                        self.logger.info(f"🔧 ARTIST FOLLOW-UP SCALING: {scaled_target_candidates} candidates for {recently_shown_count} recently shown tracks")
+                else:
+                    # Style/genre follow-ups - moderate scaling
+                    scaled_target_candidates = max(150, recently_shown_count * 10)
+                    self.logger.info(f"🔧 STYLE FOLLOW-UP SCALING: {scaled_target_candidates} candidates for {recently_shown_count} recently shown tracks")
+                    
+                # Apply the scaling
+                self.target_candidates = scaled_target_candidates
+                self.logger.info(f"🎯 CANDIDATE SCALING: {self.target_candidates} (from {base_target_candidates}) for follow-up query")
+            else:
+                self.logger.info(f"🎯 NEW QUERY: Using base {self.target_candidates} candidates")
+
             # Phase 1: Generate candidates using shared generator with discovery strategy
             candidates = await self.candidate_generator.generate_candidate_pool(
                 entities=entities,
                 intent_analysis=intent_analysis,
                 agent_type="discovery",
                 target_candidates=self.target_candidates,
-                detected_intent=candidate_generation_intent  # Use the adjusted intent
+                detected_intent=candidate_generation_intent,  # Use the adjusted intent
+                # 🚨 CRITICAL FIX: Pass recently shown tracks to avoid duplicates during generation
+                recently_shown_track_ids=state.recently_shown_track_ids or []
             )
             
             self.logger.debug(f"Generated {len(candidates)} discovery candidates")
@@ -663,13 +722,44 @@ class DiscoveryAgent(BaseAgent):
         # 🔧 DEBUG: Check if we have candidates to process
         self.logger.info(f"About to start filtering loop with {len(scored_candidates)} scored candidates")
         
+        # 🔧 NEW: Extract required genres for genre filtering
+        required_genres = self._extract_required_genres(entities)
+        
+        # 🎯 NEW: Also check for preserved genres from context overrides (follow-up queries)
+        if context_override:
+            constraint_overrides = context_override.get('constraint_overrides', {})
+            preserved_genres = constraint_overrides.get('required_genres', [])
+            if preserved_genres:
+                required_genres.extend(preserved_genres)
+                required_genres = list(set(required_genres))  # Remove duplicates
+                self.logger.info(f"🎯 PRESERVED GENRES from follow-up context: {preserved_genres}")
+                self.logger.info(f"🎯 COMBINED required genres: {required_genres}")
+        
         filtered = []
         for i, candidate in enumerate(scored_candidates):
             candidate_artist = candidate.get('artist', '')
             candidate_name = candidate.get('name', 'Unknown')
             
-            # 🔧 DEBUG: Log each candidate being processed (use info level to ensure visibility)
             self.logger.info(f"Processing candidate {i+1}/{len(scored_candidates)}: '{candidate_name}' by '{candidate_artist}'")
+            
+            # 🔧 NEW: Check for genre filtering requirements in by_artist queries
+            if intent_value == 'by_artist' and required_genres:
+                self.logger.info(f"🎯 GENRE FILTERING: by_artist query with required genres: {required_genres}")
+                
+                # Apply strict genre filtering for by_artist queries with genre requirements
+                genre_match = await self._strict_genre_match(candidate, required_genres)
+                if not genre_match:
+                    self.logger.debug(f"❌ REJECTED (genre): {candidate_name} by {candidate_artist} - doesn't match required genres {required_genres}")
+                    continue
+                else:
+                    self.logger.debug(f"✅ GENRE MATCH: {candidate_name} by {candidate_artist} matches required genres")
+            
+            # Skip target artist checks for by_artist intent since ALL tracks should be by target artist
+            if intent_value == 'by_artist':
+                # For by_artist intent, we expect ALL tracks to be by the target artist
+                self.logger.debug(f"✅ ACCEPTED: {candidate_name} by {candidate_artist}")
+                filtered.append(candidate)
+                continue
             
             # ✅ SPECIAL HANDLING: For artist similarity, prioritize target artist tracks
             if is_artist_similarity and target_artists:
@@ -754,114 +844,187 @@ class DiscoveryAgent(BaseAgent):
         
         self.logger.info(f"Discovery filtering result: {len(scored_candidates)} -> {len(filtered)} candidates")
         
+        # 🔧 CRITICAL DEBUG: Log what we're passing to diversity filtering
+        self.logger.info(f"🔧 DEBUG: About to call diversity filtering with {len(filtered)} candidates")
+        self.logger.info(f"🔧 DEBUG: First few candidates: {[c.get('name', 'Unknown') for c in filtered[:3]]}")
+        
         # Ensure diversity and novelty
         filtered = self._ensure_discovery_diversity(filtered, intent_analysis, context_override)
+        
+        # 🔧 CRITICAL DEBUG: Log what diversity filtering returned
+        self.logger.info(f"🔧 DEBUG: Diversity filtering returned {len(filtered)} candidates")
         
         return filtered
     
     def _ensure_discovery_diversity(self, candidates: List[Dict[str, Any]], intent_analysis: Dict[str, Any], context_override: Dict[str, Any] = None) -> List[Dict[str, Any]]:
-        """Ensure diversity in discovery recommendations."""
-        seen_artists = {}  # Changed to dict to track count per artist
-        seen_genres = set()
-        diverse_candidates = []
-        
+        """Ensure diversity in discovery recommendations with adaptive limits."""
         # Get intent to adjust diversity rules
         intent = intent_analysis.get('intent', '').lower()
         
         # 🚀 Apply context override constraints for followup intents
-        max_tracks_per_artist = 1  # Default strict diversity
         target_artist_from_override = None
+        candidate_limit = len(candidates)  # Use input candidates, not empty diverse_candidates
+        max_tracks_per_artist = 1  # 🔧 FIX: Initialize default value at the start
+        
+        # 🔧 CRITICAL FIX: For by_artist intents, allow many tracks from the same artist
+        if intent == 'by_artist':
+            max_tracks_per_artist = 20  # Allow many tracks for by_artist queries
+            self.logger.info(f"🔧 BY_ARTIST INTENT: Allowing up to {max_tracks_per_artist} tracks from same artist")
+            return self._apply_diversity_filtering(candidates, max_tracks_per_artist, candidate_limit, target_artist_from_override, intent)
         
         if context_override:
-            # Handle both dictionary and object formats
-            is_followup = False
-            constraint_overrides = None
-            target_entity = None
+            target_artist_from_override = context_override.get('target_artist')
+            intent_override = context_override.get('intent')
             
-            if isinstance(context_override, dict):
-                is_followup = context_override.get('is_followup', False)
-                constraint_overrides = context_override.get('constraint_overrides')
-                target_entity = context_override.get('target_entity')
-            elif hasattr(context_override, 'is_followup'):
-                is_followup = context_override.is_followup
-                constraint_overrides = getattr(context_override, 'constraint_overrides', None)
-                target_entity = getattr(context_override, 'target_entity', None)
+            # 🔧 NEW: Check for constraint_overrides first
+            constraint_overrides = context_override.get('constraint_overrides', {})
+            diversity_limits = constraint_overrides.get('diversity_limits', {})
             
-            if is_followup and target_entity:
-                target_artist_from_override = target_entity
-                # For followup intents, allow MANY more tracks from target artist
-                max_tracks_per_artist = 10  # Increased from 8 to 10 for better artist deep dives
+            if 'same_artist_limit' in diversity_limits:
+                max_tracks_per_artist = diversity_limits['same_artist_limit']
+                self.logger.info(f"🔧 CONSTRAINT OVERRIDE: Using same_artist_limit={max_tracks_per_artist} from context override")
+                return self._apply_diversity_filtering(candidates, max_tracks_per_artist, candidate_limit, target_artist_from_override, intent)
+            elif intent_override in ['artist_deep_dive', 'artist_similarity', 'style_continuation', 'artist_style_refinement', 'hybrid_artist_genre']:
+                max_tracks_per_artist = 10  # Allow more tracks from same artist for followup
+                self.logger.info(f"🔧 INTENT OVERRIDE: Using max_tracks_per_artist={max_tracks_per_artist} for {intent_override}")
+                return self._apply_diversity_filtering(candidates, max_tracks_per_artist, candidate_limit, target_artist_from_override, intent)
+            
+            # 🚀 CRITICAL FIX: For follow-ups, generate many more candidates to account for duplicates
+            if intent_override in ['artist_deep_dive', 'artist_similarity', 'style_continuation', 'artist_style_refinement', 'hybrid_artist_genre']:
+                candidate_limit = self.final_recommendations * 12  # Increased from 6x to 12x
+                self.logger.info(f"🔧 FOLLOW-UP FIX: Generating 12x candidates ({candidate_limit}) to account for heavy duplicate filtering")
+            
+            # Extract target artist from followup context  
+            if target_artist_from_override:
                 self.logger.info(f"🚀 Context override: allowing up to {max_tracks_per_artist} tracks from target artist '{target_artist_from_override}'")
+            elif context_override.get('target_entity'):
+                target_artist_from_override = context_override.get('target_entity')
+                self.logger.info(f"🚀 Context override: allowing up to {max_tracks_per_artist} tracks from target entity '{target_artist_from_override}'")
+                
+        # 🔧 Fallback candidate limit logic
+        if candidate_limit > len(candidates):
+            candidate_limit = len(candidates)
         
-        # For artist_similarity, allow more tracks per similar artist (original logic)
-        if not target_artist_from_override and intent == 'artist_similarity':
-            max_tracks_per_artist = 3
+        # 🎯 NEW: ADAPTIVE DIVERSITY SYSTEM
+        return self._adaptive_diversity_filtering(candidates, candidate_limit, target_artist_from_override, intent)
+    
+    def _adaptive_diversity_filtering(self, candidates: List[Dict[str, Any]], candidate_limit: int, target_artist_from_override: str, intent: str) -> List[Dict[str, Any]]:
+        """Apply adaptive diversity filtering that relaxes limits if we don't have enough valid candidates."""
+        target_recommendations = self.final_recommendations  # Usually 10
         
-        # 🔧 DEBUG: Log diversity filtering process
-        self.logger.info(f"🔧 DEBUG: Starting diversity filtering with {len(candidates)} candidates")
-        self.logger.info(f"🔧 DEBUG: Intent: {intent}, max tracks per artist: {max_tracks_per_artist}")
-        if target_artist_from_override:
-            self.logger.info(f"🔧 DEBUG: Target artist from context override: {target_artist_from_override}")
+        # 🎯 Progressive diversity limits to try
+        diversity_attempts = [1, 2, 3, 5, 8]  # Start strict, progressively relax
+        
+        self.logger.info(f"🎯 ADAPTIVE DIVERSITY: Target {target_recommendations} recommendations from {len(candidates)} candidates")
+        
+        best_result = []
+        
+        for attempt, max_tracks_per_artist in enumerate(diversity_attempts):
+            self.logger.info(f"🎯 ATTEMPT {attempt + 1}: Trying max_tracks_per_artist={max_tracks_per_artist}")
+            
+            # Apply diversity filtering with current limit
+            filtered_candidates = self._apply_diversity_filtering(
+                candidates, max_tracks_per_artist, candidate_limit, target_artist_from_override, intent
+            )
+            
+            # Count candidates that would pass quality filtering (exclude fake tracks)
+            valid_candidates = self._count_valid_candidates(filtered_candidates)
+            
+            self.logger.info(f"🎯 ATTEMPT {attempt + 1} RESULT: {len(filtered_candidates)} total, {valid_candidates} valid candidates")
+            
+            # Update best result if this is better
+            if len(filtered_candidates) > len(best_result):
+                best_result = filtered_candidates
+            
+            # Check if we have enough valid candidates
+            if valid_candidates >= target_recommendations * 0.8:  # 80% of target (8 out of 10)
+                self.logger.info(f"🎯 SUCCESS: Found {valid_candidates} valid candidates (≥{target_recommendations * 0.8}), stopping diversity relaxation")
+                break
+            elif valid_candidates >= target_recommendations * 0.6:  # 60% of target (6 out of 10)
+                self.logger.info(f"🎯 ACCEPTABLE: Found {valid_candidates} valid candidates (≥{target_recommendations * 0.6}), trying one more level")
+                # Continue to next attempt but mark this as acceptable
+                continue
+            else:
+                self.logger.info(f"🎯 INSUFFICIENT: Only {valid_candidates} valid candidates (<{target_recommendations * 0.6}), trying more relaxed limits")
+                continue
+        
+        final_count = len(best_result)
+        valid_count = self._count_valid_candidates(best_result)
+        
+        self.logger.info(f"🎯 ADAPTIVE DIVERSITY COMPLETE: {final_count} candidates ({valid_count} estimated valid)")
+        
+        return best_result
+    
+    def _count_valid_candidates(self, candidates: List[Dict[str, Any]]) -> int:
+        """Count candidates that would likely pass Judge Agent quality filtering (not fake tracks)."""
+        valid_count = 0
         
         for candidate in candidates:
+            # Check for fake track indicators (what Judge Agent rejects)
+            listeners = candidate.get('listeners', 0)
+            playcount = candidate.get('playcount', 0)
+            
+            # Handle None values
+            if listeners is None:
+                listeners = 0
+            if playcount is None:
+                playcount = 0
+                
+            # Convert to numbers if they're strings
+            try:
+                listeners = int(listeners) if listeners else 0
+                playcount = int(playcount) if playcount else 0
+            except (ValueError, TypeError):
+                listeners = 0
+                playcount = 0
+            
+            # Judge Agent rejects tracks with zero listeners AND zero playcount
+            if listeners > 0 or playcount > 0:
+                valid_count += 1
+        
+        return valid_count
+    
+    def _apply_diversity_filtering(self, candidates: List[Dict[str, Any]], max_tracks_per_artist: int, candidate_limit: int, target_artist_from_override: str, intent: str) -> List[Dict[str, Any]]:
+        """Apply diversity filtering with specified artist limits."""
+        self.logger.info(f"🔧 DEBUG: Starting diversity filtering with {len(candidates)} candidates")
+        self.logger.info(f"🔧 DEBUG: Intent: {intent}, max tracks per artist: {max_tracks_per_artist}")
+        self.logger.info(f"🔧 DEBUG: Candidate limit: {candidate_limit}")
+        self.logger.info(f"🔧 DEBUG: Target artist from context override: {target_artist_from_override}")
+        
+        final_candidates = []
+        # Change seen_artists to track count per artist
+        seen_artists = {}
+        seen_genres = set()
+        
+        # 🔧 Sort candidates by combined_score to prioritize higher quality tracks
+        candidates.sort(key=lambda x: x.get('combined_score', 0), reverse=True)
+        
+        for candidate in candidates:
+            if len(final_candidates) >= candidate_limit:
+                break
+                
             artist = candidate.get('artist', '').lower()
-            candidate_name = candidate.get('name', 'Unknown')
-            tags = candidate.get('tags', [])
+            candidate_genres = candidate.get('genres', [])
             
-            # 🔧 DEBUG: Log target artist tracks specifically
-            is_target_artist = target_artist_from_override and artist == target_artist_from_override.lower()
-            if is_target_artist or 'mk.gee' in artist:
-                self.logger.info(f"🔧 DEBUG: Processing diversity for {candidate_name} by {artist}")
-                self.logger.info(f"🔧 DEBUG: Is target artist: {is_target_artist}")
-                self.logger.info(f"🔧 DEBUG: Artist track count: {seen_artists.get(artist, 0)}")
-            
-            # Check artist limit
+            # Check if this candidate is from target artist
+            is_target_artist = (target_artist_from_override and 
+                              artist == target_artist_from_override.lower())
+                              
             artist_count = seen_artists.get(artist, 0)
             
-            # 🚀 Apply different limits for target vs non-target artists
-            if is_target_artist:
-                # Target artist from context override gets high limit
-                artist_limit = max_tracks_per_artist
-            else:
-                # Other artists get standard diversity limit
-                artist_limit = 1 if target_artist_from_override else max_tracks_per_artist
-            
-            if artist_count >= artist_limit:
-                if is_target_artist or 'mk.gee' in artist:
-                    msg = f"❌ DEBUG: REJECTED {candidate_name} - artist limit reached ({artist_count}/{artist_limit})"
-                    self.logger.info(msg)
-                continue
-            
-            # Limit genre repetition (unless target artist)
-            candidate_genres = [tag.lower() for tag in tags[:3]]
-            genre_overlap = len(set(candidate_genres) & seen_genres)
-            if not is_target_artist and genre_overlap > 1:  # Allow overlap for target artist
-                if 'mk.gee' in artist:
-                    msg = f"❌ DEBUG: REJECTED {candidate_name} - genre overlap {genre_overlap} > 1"
-                    self.logger.info(msg)
-                continue
-            
-            # Accept the candidate
-            seen_artists[artist] = artist_count + 1
-            seen_genres.update(candidate_genres)
-            diverse_candidates.append(candidate)
-            
-            # 🔧 DEBUG: Log acceptance
-            if is_target_artist or 'mk.gee' in artist:
-                msg = f"✅ DEBUG: ACCEPTED {candidate_name} for diversity (track {seen_artists[artist]}/{artist_limit})"
-                self.logger.info(msg)
-            
-            # Limit to prevent over-filtering
-            if len(diverse_candidates) >= self.final_recommendations * 2:
-                self.logger.info(f"🔧 DEBUG: Reached diversity limit of {self.final_recommendations * 2}")
-                break
+            # 🔧 UPDATED LOGIC: Use max_tracks_per_artist for all cases
+            if artist_count < max_tracks_per_artist:
+                final_candidates.append(candidate)
+                seen_artists[artist] = artist_count + 1
+            # Only log rejections in debug mode to reduce noise
+            # else:
+            #     self.logger.debug(f"❌ DEBUG: REJECTED {candidate.get('name', 'Unknown')} - artist limit reached ({artist_count}/{max_tracks_per_artist})")
         
-        self.logger.info(f"🔧 DEBUG: Diversity filtering: {len(candidates)} -> {len(diverse_candidates)} candidates")
         if target_artist_from_override:
-            target_count = sum(1 for c in diverse_candidates if c.get('artist', '').lower() == target_artist_from_override.lower())
+            target_count = sum(1 for c in final_candidates if c.get('artist', '').lower() == target_artist_from_override.lower())
             self.logger.info(f"🚀 Target artist '{target_artist_from_override}' tracks in final candidates: {target_count}")
         
-        return diverse_candidates
+        return final_candidates
     
     async def _create_discovery_recommendations(
         self,
@@ -1003,8 +1166,30 @@ class DiscoveryAgent(BaseAgent):
         artists = musical_entities.get('artists', {})
         
         target_artists = []
-        target_artists.extend(artists.get('primary', []))
-        target_artists.extend(artists.get('similar_to', []))
+        primary_artists = artists.get('primary', [])
+        similar_artists = artists.get('similar_to', [])
+        
+        # 🚨 CRITICAL FIX: Filter out invalid artist names like "this", "that", "these"
+        invalid_artist_names = {'this', 'that', 'these', 'those', 'it', 'them'}
+        
+        for artist in primary_artists:
+            artist_name = str(artist).strip().lower()
+            if artist_name not in invalid_artist_names and len(artist_name) > 1:
+                target_artists.append(str(artist).strip())
+                
+        for artist in similar_artists:
+            artist_name = str(artist).strip().lower()
+            if artist_name not in invalid_artist_names and len(artist_name) > 1:
+                target_artists.append(str(artist).strip())
+        
+        # 🔧 DEBUG: Log filtering results for Discovery Agent
+        if any(str(artist).strip().lower() in invalid_artist_names for artist in primary_artists + similar_artists):
+            filtered_out = [str(artist) for artist in primary_artists + similar_artists 
+                          if str(artist).strip().lower() in invalid_artist_names]
+            remaining = [str(artist) for artist in primary_artists + similar_artists 
+                        if str(artist).strip().lower() not in invalid_artist_names]
+            self.logger.info(f"🚨 DISCOVERY AGENT: Filtered out invalid artist names: {filtered_out}")
+            self.logger.info(f"🎯 DISCOVERY AGENT: Remaining valid artist names: {remaining}")
         
         return list(set(target_artists))  # Remove duplicates
     
@@ -1296,25 +1481,24 @@ class DiscoveryAgent(BaseAgent):
         return filtered
 
     def _extract_required_genres(self, entities: Dict[str, Any]) -> List[str]:
-        """Extract required genres for filtering from entities."""
-        required_genres = []
+        """Extract required genres from the query entities."""
+        try:
+            musical_entities = entities.get('musical_entities', {})
+            genres = musical_entities.get('genres', {})
+            
+            # Get required genres if any
+            required_genres = []
+            if genres.get('primary'):
+                required_genres.extend(genres['primary'])
+            if genres.get('secondary'):
+                required_genres.extend(genres['secondary'])
+                
+            self.logger.debug(f"🎯 Extracted required genres: {required_genres}")
+            return required_genres
         
-        # Try nested format first (musical_entities wrapper)
-        musical_entities = entities.get('musical_entities', {})
-        if musical_entities.get('genres', {}).get('primary'):
-            required_genres = musical_entities['genres']['primary']
-        # Try direct format
-        elif entities.get('genres', {}).get('primary'):
-            required_genres = entities['genres']['primary']
-        # Try simple list format
-        elif entities.get('genres') and isinstance(entities['genres'], list):
-            required_genres = entities['genres']
-        
-        # Convert to strings and clean up
-        required_genres = [str(genre).lower().strip() for genre in required_genres if genre]
-        
-        self.logger.debug(f"🎯 Extracted required genres: {required_genres}")
-        return required_genres
+        except Exception as e:
+            self.logger.warning(f"Failed to extract required genres: {e}")
+            return []
 
     async def _strict_genre_match(self, candidate: Dict[str, Any], required_genres: List[str]) -> bool:
         """Strict genre matching for hybrid queries using API service."""

@@ -273,8 +273,16 @@ class RankingLogic:
                 score_value = scores['contextual_relevance']
             elif component == 'context_fit' and 'contextual_relevance' in scores:
                 score_value = scores['contextual_relevance']
-            elif component == 'familiarity':
+            elif component == 'familiarity' and candidate:
+                # For contextual queries that want familiar but not mainstream music
                 score_value = self._apply_familiarity_bonus(candidate)
+            elif component == 'popularity':
+                # 🔧 NEW: Handle popularity scoring for by_artist intent
+                score_value = self._calculate_popularity_score(candidate)
+            elif component == 'recency' and candidate:
+                score_value = self._calculate_recency_score(candidate)
+            elif component == 'underground' and candidate:
+                score_value = self._calculate_underground_score(candidate)
             elif component in scores:
                 # Fallback for any other matching score components
                 score_value = scores[component]
@@ -364,10 +372,118 @@ class RankingLogic:
         
         return 0.2  # Base score for non-underground tracks
     
-    def _apply_familiarity_bonus(self, candidate: TrackRecommendation) -> float:
-        """Apply bonus for familiar tracks in contextual queries."""
-        # Simplified implementation - in real system would check user history/popularity
-        return 0.5  # Neutral score - to be enhanced with actual familiarity data
+    def _apply_familiarity_bonus(self, candidate) -> float:
+        """Apply familiarity bonus for contextual intents."""
+        # Favor tracks with moderate popularity for familiarity
+        playcount = getattr(candidate, 'playcount', 0) or 0
+        listeners = getattr(candidate, 'listeners', 0) or 0
+        
+        if listeners > 10000 and listeners < 1000000:
+            return 0.8  # Well-known but not mainstream
+        elif listeners > 1000000:
+            return 0.6  # Very mainstream
+        else:
+            return 0.3  # Too underground for familiarity
+    
+    def _calculate_popularity_score(self, candidate) -> float:
+        """Calculate popularity score for by_artist intent (higher popularity = higher score)."""
+        try:
+            listeners = getattr(candidate, 'listeners', 0) or 0
+            playcount = getattr(candidate, 'playcount', 0) or 0
+            
+            # For by_artist queries, we want popular tracks from the artist
+            # Higher popularity = higher score (opposite of novelty)
+            if listeners == 0 and playcount == 0:
+                return 0.1  # Unknown tracks get low score
+            
+            # Scale based on popularity - popular tracks get higher scores
+            if listeners > 1000000:  # Very popular
+                return 1.0
+            elif listeners > 500000:  # Moderately popular
+                return 0.8
+            elif listeners > 100000:  # Some recognition
+                return 0.6
+            elif listeners > 10000:   # Limited recognition
+                return 0.4
+            else:  # Low popularity
+                return 0.2
+                
+        except Exception as e:
+            self.logger.warning("Popularity scoring failed", error=str(e))
+            return 0.5
+    
+    def _calculate_recency_score(self, candidate) -> float:
+        """Calculate recency score for by_artist intent (newer tracks get slight boost)."""
+        try:
+            # Simple recency scoring - newer releases get slight preference
+            from datetime import datetime
+            
+            # Get track release date if available
+            release_date = None
+            if hasattr(candidate, 'release_date') and candidate.release_date:
+                release_date = candidate.release_date
+            elif hasattr(candidate, 'raw_source_data') and candidate.raw_source_data:
+                # Try to extract from raw data
+                raw_data = candidate.raw_source_data
+                if isinstance(raw_data, dict):
+                    release_date = raw_data.get('album', {}).get('release_date')
+            
+            if release_date:
+                # Simple scoring: tracks from last 5 years get boost
+                current_year = datetime.now().year
+                try:
+                    if isinstance(release_date, str):
+                        release_year = int(release_date[:4])  # Extract year from date string
+                    else:
+                        release_year = release_date.year
+                    
+                    years_old = current_year - release_year
+                    if years_old <= 2:
+                        return 1.0  # Very recent
+                    elif years_old <= 5:
+                        return 0.8  # Recent
+                    elif years_old <= 10:
+                        return 0.6  # Moderately old
+                    else:
+                        return 0.4  # Classic/older
+                except (ValueError, AttributeError):
+                    return 0.6  # Default for unknown dates
+            
+            return 0.6  # Default when no date available
+            
+        except Exception as e:
+            self.logger.warning(f"Error calculating recency score: {e}")
+            return 0.6  # Default fallback
+    
+    def _calculate_underground_score(self, candidate) -> float:
+        """Calculate underground score for by_artist_underground intent (lower popularity = higher score)."""
+        try:
+            # Get popularity metrics
+            listeners = getattr(candidate, 'listeners', 0) or 0
+            playcount = getattr(candidate, 'playcount', 0) or 0
+            
+            # Underground scoring - inverse of popularity
+            # Fewer listeners = more underground = higher score
+            if listeners == 0 and playcount == 0:
+                return 0.5  # No data - neutral score
+            
+            # Scale listeners to underground score
+            if listeners < 1000:
+                return 1.0  # Very underground
+            elif listeners < 10000:
+                return 0.9  # Underground
+            elif listeners < 50000:
+                return 0.7  # Moderately underground
+            elif listeners < 100000:
+                return 0.5  # Getting mainstream
+            elif listeners < 500000:
+                return 0.3  # Popular
+            else:
+                return 0.1  # Very mainstream
+                
+        except Exception as e:
+            self.logger.warning(f"Error calculating underground score: {e}")
+            return 0.5  # Default fallback
     
     def _rank_balanced(
         self,
@@ -676,6 +792,16 @@ class RankingLogic:
         """Initialize intent-aware ranking weight configurations."""
         return {
             # Intent-specific scoring weights from design document
+            'by_artist': {
+                'quality': 0.5,              # Most important - best tracks by artist
+                'popularity': 0.3,           # Favor well-known tracks by artist
+                'recency': 0.2              # Mix of old and new from artist
+            },
+            'by_artist_underground': {
+                'novelty': 0.5,              # Most important - underground/rare tracks
+                'quality': 0.3,              # Secondary - maintain some quality
+                'underground': 0.2           # Boost underground tracks
+            },
             'artist_similarity': {
                 'similarity': 0.6,
                 'target_artist_boost': 0.2,
@@ -829,16 +955,30 @@ class RankingLogic:
     def get_novelty_threshold(self, intent: str) -> float:
         """Get novelty threshold based on intent type."""
         thresholds = {
+            'by_artist': 0.0,            # 🔧 NEW: No novelty filtering for by_artist queries
+            'by_artist_underground': 0.6, # 🔧 NEW: High novelty filtering for underground queries
             'discovery': 0.6,
+            'artist_similarity': 0.3,
             'similarity': 0.3,
             'genre_mood': 0.5,
+            'contextual': 0.4,
             'hybrid': 0.4,
             'exploration': 0.7
         }
         
-        # Extract base intent if it's a hybrid sub-type
-        base_intent = intent.split('_')[0] if '_' in intent else intent
-        return thresholds.get(base_intent, 0.4)
+        # 🚨 CRITICAL FIX: Check exact intent first, then try base intent extraction
+        # The old logic incorrectly treated 'by_artist' as a hybrid intent
+        if intent in thresholds:
+            return thresholds[intent]
+        
+        # Only extract base intent for actual hybrid sub-types (like 'hybrid_similarity_primary')
+        if '_' in intent:
+            base_intent = intent.split('_')[0]
+            if base_intent in thresholds:
+                return thresholds[base_intent]
+        
+        # Final fallback
+        return 0.4
 
     def is_genre_hybrid_query(self, entities: Dict[str, Any], intent_analysis: Dict[str, Any]) -> bool:
         """
@@ -898,18 +1038,23 @@ class RankingLogic:
             self.logger.debug("🎯 Genre-hybrid check: NOT DETECTED - pure similarity or discovery query")
             return False
     
-    def get_diversity_limits(self, intent: str) -> Dict[str, Any]:
-        """Get intent-specific diversity limits."""
+    def get_diversity_limits(self, intent: str) -> Dict[str, int]:
+        """Get diversity limits based on intent type."""
         limits = {
             'by_artist': {
-                'max_per_artist': 10,   # 🎯 NEW: Allow many tracks from target artist  
-                'max_per_genre': 10,    # Allow genre variety from same artist
-                'min_genres': 1         # No genre diversity requirement
+                'max_per_artist': 20,   # 🔧 UPDATED: Allow 20 tracks from target artist
+                'max_per_genre': 15,    # Allow diverse genres from artist
+                'max_per_source': 20    # Primarily from one source (discovery)
+            },
+            'by_artist_underground': {
+                'max_per_artist': 20,   # 🔧 NEW: Allow 20 underground tracks from target artist
+                'max_per_genre': 15,    # Allow diverse genres from artist
+                'max_per_source': 20    # Primarily from one source (discovery)
             },
             'artist_similarity': {
-                'max_per_artist': 5,    # 🔧 INCREASED: Allow more tracks from target artist
-                'max_per_genre': 8, 
-                'min_genres': 2
+                'max_per_artist': 3,    # Limit tracks per similar artist
+                'max_per_genre': 8,     # Allow genre diversity
+                'max_per_source': 12    # Balanced source distribution
             },
             'discovery': {
                 'max_per_artist': 1,    # Strict diversity for discovery

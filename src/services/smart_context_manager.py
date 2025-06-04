@@ -559,12 +559,17 @@ class SmartContextManager:
         query: str,
         llm_understanding: Optional[Dict],
         recommendations: List[Dict],
-        context_decision: Dict[str, Any]
+        context_decision: Dict[str, Any],
+        extracted_entities: Optional[Dict] = None
     ):
         """Update context after providing recommendations."""
         
-        # Create entities dict from LLM understanding or query analysis
-        if llm_understanding:
+        # Create entities dict from extracted entities (preferred) or LLM understanding or query analysis
+        if extracted_entities:
+            # 🎯 NEW: Use the complete extracted entities structure if available
+            entities = extracted_entities
+            self.logger.info(f"🎯 PRESERVING EXTRACTED ENTITIES for session {session_id}: {list(extracted_entities.get('musical_entities', {}).get('genres', {}).get('primary', []))}")
+        elif llm_understanding:
             # Handle both dict and QueryUnderstanding object
             if hasattr(llm_understanding, 'artists'):  # QueryUnderstanding object
                 entities = {

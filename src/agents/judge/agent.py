@@ -101,12 +101,38 @@ class JudgeAgent(BaseAgent):
             # Collect all candidate recommendations
             all_candidates = self._collect_all_candidates(state)
             
+            self.logger.debug(f"Collected {len(all_candidates)} total candidates")
+            
+            # 🔧 DEBUG: Check if recently_shown_track_ids is populated
+            self.logger.info(
+                f"🔍 JUDGE DEBUG: recently_shown_track_ids = {getattr(state, 'recently_shown_track_ids', 'NOT_SET')}"
+            )
+            self.logger.info(
+                f"🔍 JUDGE DEBUG: recently_shown_track_ids type = {type(getattr(state, 'recently_shown_track_ids', None))}"
+            )
+            
             if not all_candidates:
                 self.logger.warning("No candidates found for evaluation")
                 state.final_recommendations = []
                 return state
             
-            self.logger.debug(f"Collected {len(all_candidates)} total candidates")
+            # 🔧 NEW: Filter out recently shown tracks for follow-up queries
+            if state.recently_shown_track_ids:
+                original_count = len(all_candidates)
+                all_candidates = self._filter_out_recently_shown(all_candidates, state)
+                filtered_count = len(all_candidates)
+                
+                self.logger.info(
+                    f"🚫 DUPLICATE FILTER: Filtered out {original_count - filtered_count} "
+                    f"previously shown tracks (kept {filtered_count})"
+                )
+                
+                if not all_candidates:
+                    self.logger.warning("All candidates were filtered as duplicates")
+                    state.final_recommendations = []
+                    return state
+            else:
+                self.logger.info("🔍 JUDGE DEBUG: No recently shown tracks to filter, skipping duplicate filtering")
             
             # Phase 1: Score all candidates with contextual relevance
             scored_candidates = await self._score_all_candidates(all_candidates, state)
@@ -825,3 +851,88 @@ class JudgeAgent(BaseAgent):
         
         # Default fallback
         return 'hybrid' 
+
+    async def run(self, state: MusicRecommenderState) -> MusicRecommenderState:
+        """
+        Main judge agent workflow.
+        """
+        self.logger.info("🏛️ JUDGE AGENT: Starting final candidate evaluation and ranking")
+        
+        # Collect all candidates from various agents
+        candidates = await self._collect_all_candidates(state)
+        
+        if not candidates:
+            self.logger.warning("No candidates received from advocate agents")
+            state.final_recommendations = []
+            return state
+        
+        self.logger.info(f"🔍 JUDGE: Collected {len(candidates)} total candidates for evaluation")
+        
+        # 🔧 NEW: Filter out recently shown tracks for follow-up queries
+        if state.recently_shown_track_ids:
+            original_count = len(candidates)
+            candidates = self._filter_out_recently_shown(candidates, state)
+            filtered_count = len(candidates)
+            
+            self.logger.info(
+                f"🚫 DUPLICATE FILTER: Filtered out {original_count - filtered_count} "
+                f"previously shown tracks (kept {filtered_count})"
+            )
+            
+            if not candidates:
+                self.logger.warning("All candidates were filtered as duplicates")
+                state.final_recommendations = []
+                return state
+        else:
+            self.logger.info("🔍 JUDGE DEBUG: No recently shown tracks to filter, skipping duplicate filtering")
+        
+        # Score all candidates
+        scored_candidates = await self._score_all_candidates(candidates, state)
+        
+        # Apply ranking and diversity constraints
+        final_recommendations = await self._rank_and_select(scored_candidates, state)
+        
+        state.final_recommendations = final_recommendations
+        
+        self.logger.info(f"✅ JUDGE: Selected {len(final_recommendations)} final recommendations")
+        
+        return state 
+
+    def _filter_out_recently_shown(
+        self, 
+        candidates: List[TrackRecommendation], 
+        state: MusicRecommenderState
+    ) -> List[TrackRecommendation]:
+        """Filter out tracks that were recently shown to avoid duplicates in follow-up queries."""
+        if not state.recently_shown_track_ids:
+            return candidates
+        
+        recently_shown_set = set(state.recently_shown_track_ids)
+        filtered_candidates = []
+        
+        # 🔧 DEBUG: Log the recently shown IDs
+        self.logger.info(
+            f"🚫 FILTERING DUPLICATES: Checking {len(candidates)} candidates against "
+            f"{len(recently_shown_set)} recently shown tracks"
+        )
+        self.logger.info(f"🚫 Recently shown track IDs: {list(recently_shown_set)}")
+        
+        for candidate in candidates:
+            # Create the same track ID format as used in EnhancedRecommendationService
+            candidate_track_id = f"{candidate.artist.lower().strip()}::{candidate.title.lower().strip()}"
+            
+            # 🔧 DEBUG: Log each candidate check
+            is_duplicate = candidate_track_id in recently_shown_set
+            self.logger.info(
+                f"🔍 Checking: '{candidate_track_id}' -> {'DUPLICATE' if is_duplicate else 'NEW'}"
+            )
+            
+            if not is_duplicate:
+                filtered_candidates.append(candidate)
+            else:
+                self.logger.info(
+                    f"🚫 Filtering duplicate: {candidate.title} by {candidate.artist} "
+                    f"(ID: {candidate_track_id})"
+                )
+        
+        return filtered_candidates 

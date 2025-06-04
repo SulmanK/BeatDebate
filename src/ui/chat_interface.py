@@ -192,7 +192,7 @@ class BeatDebateChatInterface:
                         h["user_message"] for h in recent_history
                     ],
                     "previous_recommendations": [
-                        h.get("recommendations", [])[:1]  # Just first track
+                        h.get("recommendations", [])  # Include ALL tracks, not just first
                         for h in recent_history
                     ]
                 }

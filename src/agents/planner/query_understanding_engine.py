@@ -63,32 +63,37 @@ CRITICAL: Classify queries into these specific intent types based on the design 
 
 1. BY_ARTIST ("Music by [Artist]", "Give me tracks by [Artist]", "[Artist] songs")
    - Focus on finding tracks BY the specified artist
-   - User wants the artist's own discography/tracks
+   - User wants the artist's own discography/tracks (popular/well-known)
 
-2. ARTIST_SIMILARITY ("Music like [Artist]", "Similar to [Artist]", "Artists that sound like [Artist]")
+2. BY_ARTIST_UNDERGROUND ("Discover underground tracks by [Artist]", "Find deep cuts by [Artist]", "Hidden gems by [Artist]")
+   - Focus on finding UNDERGROUND/LESSER-KNOWN tracks BY the specified artist
+   - User wants the artist's own tracks BUT specifically underground/rare/deep cuts
+   - Keywords: "discover", "underground", "deep cuts", "hidden gems", "b-sides", "rare tracks"
+
+3. ARTIST_SIMILARITY ("Music like [Artist]", "Similar to [Artist]", "Artists that sound like [Artist]")
    - Focus on finding artists/tracks that sound similar to the target artist
    - User wants OTHER artists that are similar, NOT the target artist's own tracks
    - Extract artist names EXACTLY as written (e.g., "Mk.gee", "BROCKHAMPTON", "!!!")
 
-3. DISCOVERY ("Find me underground indie rock", "Something new and different")
+4. DISCOVERY ("Find me underground indie rock", "Something new and different")
    - Focus on discovering truly new/unknown music
-   - Emphasis on novelty and underground tracks
+   - Emphasis on novelty and underground tracks (NO specific artist mentioned)
 
-4. GENRE_MOOD ("Upbeat electronic music", "Sad indie songs")
+5. GENRE_MOOD ("Upbeat electronic music", "Sad indie songs")
    - Focus on specific vibes, genres, or moods
    - No specific artist reference, just style/feel
 
-5. CONTEXTUAL ("Music for studying", "Workout playlist", "Road trip songs")
+6. CONTEXTUAL ("Music for studying", "Workout playlist", "Road trip songs")
    - Focus on functional music for specific activities
    - Context-driven recommendations
 
-6. HYBRID ("Chill songs like Bon Iver", "Upbeat music similar to Daft Punk")
+7. HYBRID ("Chill songs like Bon Iver", "Upbeat music similar to Daft Punk")
    - Combines artist similarity with mood/genre requirements
    - Both artist reference AND style/context requirements
 
 Return a JSON object with this exact structure:
 {
-    "intent": "by_artist|artist_similarity|discovery|genre_mood|contextual|hybrid",
+    "intent": "by_artist|by_artist_underground|artist_similarity|discovery|genre_mood|contextual|hybrid",
     "musical_entities": {
         "artists": ["artist1", "artist2"],
         "genres": ["genre1", "genre2"], 
@@ -104,10 +109,12 @@ Return a JSON object with this exact structure:
 EXAMPLES:
 - "Music by Mk.gee" → intent: "by_artist", artists: ["Mk.gee"]
 - "Give me tracks by Radiohead" → intent: "by_artist", artists: ["Radiohead"]
-- "Mk.gee songs" → intent: "by_artist", artists: ["Mk.gee"]
+- "Discover underground tracks by Mk.gee" → intent: "by_artist_underground", artists: ["Mk.gee"], context_factors: ["underground"]
+- "Find deep cuts by Kendrick Lamar" → intent: "by_artist_underground", artists: ["Kendrick Lamar"], context_factors: ["underground"]
+- "Hidden gems by The Beatles" → intent: "by_artist_underground", artists: ["The Beatles"], context_factors: ["underground"]
 - "Music like Mk.gee" → intent: "artist_similarity", artists: ["Mk.gee"]
 - "Artists similar to Radiohead" → intent: "artist_similarity", artists: ["Radiohead"]
-- "Find underground electronic music" → intent: "discovery", genres: ["electronic"]
+- "Find underground electronic music" → intent: "discovery", genres: ["electronic"], context_factors: ["underground"]
 - "Happy music for working out" → intent: "contextual", moods: ["happy"], context_factors: ["workout"]
 - "Chill songs like Bon Iver" → intent: "hybrid", artists: ["Bon Iver"], moods: ["chill"]
 - "Upbeat electronic music" → intent: "genre_mood", genres: ["electronic"], moods: ["upbeat"]
@@ -344,6 +351,7 @@ Remember to return ONLY the JSON object with no additional text."""
                 # Map common intent values to valid enum values
                 intent_mapping = {
                     'by_artist': 'by_artist',
+                    'by_artist_underground': 'by_artist_underground',
                     'discovery': 'discovery',
                     'similarity': 'artist_similarity',
                     'artist_similarity': 'artist_similarity',

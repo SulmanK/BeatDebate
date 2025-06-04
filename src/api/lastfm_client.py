@@ -391,6 +391,62 @@ class LastFmClient(BaseAPIClient):
             )
             return None
     
+    async def get_similar_artists(
+        self, 
+        artist: str, 
+        limit: int = 10
+    ) -> List[ArtistMetadata]:
+        """
+        Get similar artists for a given artist.
+        
+        Args:
+            artist: Artist name
+            limit: Maximum number of similar artists to return
+            
+        Returns:
+            List of similar artist metadata
+        """
+        try:
+            data = await self._make_lastfm_request(
+                "artist.getSimilar",
+                {
+                    "artist": artist,
+                    "limit": limit
+                }
+            )
+            
+            artists = []
+            if "similarartists" in data and "artist" in data["similarartists"]:
+                similar_artists = data["similarartists"]["artist"]
+                
+                # Handle single artist result (not in list)
+                if isinstance(similar_artists, dict):
+                    similar_artists = [similar_artists]
+                    
+                for artist_data in similar_artists:
+                    artist_meta = ArtistMetadata(
+                        name=artist_data.get("name", ""),
+                        mbid=artist_data.get("mbid"),
+                        url=artist_data.get("url"),
+                    )
+                    artists.append(artist_meta)
+                    
+            self.logger.info(
+                "Similar artists search completed",
+                artist=artist,
+                results_count=len(artists),
+                limit=limit
+            )
+            return artists
+            
+        except Exception as e:
+            self.logger.error(
+                "Failed to get similar artists",
+                artist=artist,
+                error=str(e)
+            )
+            return []
+    
     async def search_by_tags(
         self, 
         tags: List[str], 

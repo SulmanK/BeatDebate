@@ -227,91 +227,80 @@ def transform_unified_to_ui_format(unified_track: UnifiedTrackMetadata) -> Dict:
 
 @app.post("/recommendations")
 async def get_recommendations(request: RecommendationRequest):
-    """
-    Get music recommendations using the 4-agent system.
-    
-    This endpoint orchestrates the complete recommendation workflow:
-    1. PlannerAgent creates strategic plan
-    2. GenreMoodAgent and DiscoveryAgent execute searches
-    3. JudgeAgent selects final recommendations
-    """
+    """Get music recommendations using the enhanced 4-agent system."""
     if not recommendation_service:
-        # Return demo response when service is not available
-        demo_tracks = [
-            UnifiedTrackMetadata(
-                name="Demo Track 1",
-                artist="Demo Artist",
-                recommendation_score=0.85,
-                recommendation_reason="This is a demo recommendation",
-                agent_source="demo"
-            ),
-            UnifiedTrackMetadata(
-                name="Demo Track 2", 
-                artist="Demo Artist 2",
-                recommendation_score=0.78,
-                recommendation_reason="This is another demo recommendation",
-                agent_source="demo"
-            )
-        ]
-        
-        # Transform to UI format and return as dict
-        return {
-            "recommendations": [transform_unified_to_ui_format(track) for track in demo_tracks],
-            "strategy_used": {"type": "demo", "reason": "Service not available"},
-            "reasoning": [
-                "Demo: PlannerAgent analyzed request",
-                "Demo: GenreMoodAgent found tracks",
-                "Demo: JudgeAgent selected recommendations"
-            ],
-            "session_id": request.session_id or "demo_session",
-            "processing_time": 1.5,
-            "metadata": {
-                "demo_mode": True,
-                "agents_used": ["demo"],
-                "total_candidates": 2,
-                "final_count": 2
-            }
-        }
+        raise HTTPException(
+            status_code=503, 
+            detail="Recommendation service not available"
+        )
     
     start_time = time.time()
+    logger.info(f"Recommendation request: {request.query}")
     
     try:
-        logger.info(f"Processing recommendation request: {request.query}")
-        
-        # Execute recommendation workflow
+        # Transform to service request format
         service_request = ServiceRequest(
             query=request.query,
             session_id=request.session_id,
             max_recommendations=request.max_recommendations,
             include_audio_features=request.include_previews,
-            context=request.chat_context
+            context=request.chat_context  # 🔧 FIX: Map chat_context to context field
         )
         
-        result = await recommendation_service.get_recommendations(service_request)
+        # Get recommendations using enhanced service
+        service_response = await recommendation_service.get_recommendations(
+            service_request
+        )
         
-        execution_time = time.time() - start_time
-        logger.info(f"Recommendation completed in {execution_time:.2f}s")
+        processing_time = time.time() - start_time
         
         # Transform recommendations to UI format
-        transformed_recommendations = []
-        for track in result.recommendations:
-            transformed_recommendations.append(transform_unified_to_ui_format(track))
+        recommendations = [
+            transform_unified_to_ui_format(track)
+            for track in service_response.recommendations
+        ]
         
-        # Return as dictionary for JSON serialization
-        return {
-            "recommendations": transformed_recommendations,
-            "strategy_used": result.strategy_used,
-            "reasoning": result.reasoning,
-            "session_id": request.session_id or result.session_id,
-            "processing_time": execution_time,
-            "metadata": result.metadata
+        # Format agent reasoning for UI
+        formatted_reasoning = []
+        for reasoning in service_response.reasoning:
+            if isinstance(reasoning, str):
+                formatted_reasoning.append(reasoning)
+            else:
+                formatted_reasoning.append(str(reasoning))
+        
+        response_data = {
+            "recommendations": recommendations,
+            "strategy_used": service_response.strategy_used,
+            "reasoning": formatted_reasoning,
+            "session_id": service_response.session_id,
+            "processing_time": processing_time,
+            "metadata": service_response.metadata
         }
         
+        logger.info(
+            f"✅ Recommendations generated: {len(recommendations)} tracks, "
+            f"{processing_time:.1f}s"
+        )
+        
+        return JSONResponse(content=response_data)
+        
     except Exception as e:
-        logger.error(f"Recommendation failed: {e}")
-        raise HTTPException(
-            status_code=500, 
-            detail=f"Recommendation failed: {str(e)}"
+        processing_time = time.time() - start_time
+        logger.error(f"Recommendation error: {str(e)}")
+        
+        # Return structured error response
+        return JSONResponse(
+            content={
+                "error": "Recommendation generation failed",
+                "detail": str(e),
+                "session_id": request.session_id,
+                "processing_time": processing_time,
+                "recommendations": [],
+                "strategy_used": {},
+                "reasoning": [f"Error: {str(e)}"],
+                "metadata": {"error": True}
+            },
+            status_code=500
         )
 
 

@@ -19,6 +19,7 @@ from langgraph.graph import StateGraph, END
 try:
     from ..models.agent_models import MusicRecommenderState, AgentConfig, SystemConfig
     from ..models.metadata_models import UnifiedTrackMetadata, MetadataSource
+    from ..models.recommendation_models import TrackRecommendation
     from ..agents import PlannerAgent, GenreMoodAgent, DiscoveryAgent, JudgeAgent
     from .api_service import APIService, get_api_service
     from .smart_context_manager import SmartContextManager
@@ -29,6 +30,7 @@ except ImportError:
     sys.path.append('src')
     from models.agent_models import MusicRecommenderState, AgentConfig, SystemConfig
     from models.metadata_models import UnifiedTrackMetadata, MetadataSource
+    from models.recommendation_models import TrackRecommendation
     from agents import PlannerAgent, GenreMoodAgent, DiscoveryAgent, JudgeAgent
     from services.api_service import APIService, get_api_service
     from services.smart_context_manager import SmartContextManager
@@ -147,33 +149,41 @@ class ContextAwareIntentAnalyzer:
         Previous artists mentioned: {previous_artists}
         Current query: "{query}"
 
-        Determine:
-        1. Is this a follow-up to previous recommendations?
-        2. What type of follow-up is it?
-        3. What are the specific constraints?
+        CRITICAL RULES:
+        1. If the current query mentions a DIFFERENT artist than previous artists, it is NOT a follow-up (return is_followup=false)
+        2. Follow-ups must explicitly reference previous context (e.g., "more", "like this", "similar") 
+        3. New standalone queries about different artists should be treated as fresh requests
+
+        Examples:
+        ✅ FOLLOW-UP: "More Mk.gee tracks" (same artist + reference word)
+        ✅ FOLLOW-UP: "More like this" (reference to previous recommendations)
+        ❌ NOT FOLLOW-UP: "Discover underground tracks by Kendrick Lamar" (different artist, no reference)
+        ❌ NOT FOLLOW-UP: "Music by The Beatles" (different artist, new request)
 
         Return JSON:
         {{
             "is_followup": true/false,
             "followup_type": "artist_deep_dive" | "style_continuation" | "artist_style_refinement" | "none",
-            "target_entity": "artist name from previous context",
+            "target_entity": "artist name from previous context (only if is_followup=true)",
             "style_modifier": "style/genre/mood constraint" or null,
             "confidence": 0.0-1.0,
             "reasoning": "brief explanation"
         }}
 
         Follow-up types:
-        - "artist_deep_dive": More tracks from same artist ("more Mk.gee songs", "I want more Mk.gee tracks")
-        - "style_continuation": More of same style ("more like this", "similar tracks") 
-        - "artist_style_refinement": More tracks from specific artist with style constraint 
-          ("Mk.gee tracks that are more electronic", "more upbeat Kendrick songs", "Can we get Mk.gee tracks that are more eletronic")
+        - "artist_deep_dive": More tracks from SAME artist ("more Mk.gee songs", "I want more Mk.gee tracks")
+        - "style_continuation": More of same style without artist reference ("more like this", "similar tracks") 
+        - "artist_style_refinement": More tracks from SAME artist with style constraint 
+          ("Mk.gee tracks that are more electronic", "more upbeat Kendrick songs")
 
-        Only return is_followup=true if the current query clearly references the previous context.
+        Only return is_followup=true if:
+        - The current query contains reference words (more, like this, similar, etc.) AND
+        - References the same artist(s) as previous context OR has no specific artist (style continuation)
         """
         
         response = await self.llm_utils.call_llm_with_json_response(
             user_prompt=prompt, 
-            system_prompt="You are an expert at analyzing conversational context for music recommendations."
+            system_prompt="You are an expert at analyzing conversational context for music recommendations. Be conservative - only detect follow-ups when there are clear references to previous context."
         )
         
         self.logger.debug(f"🎯 LLM context analysis: {response}")
@@ -188,17 +198,92 @@ class ContextAwareIntentAnalyzer:
         followup_type = llm_result.get('followup_type', 'none')
         style_modifier = llm_result.get('style_modifier', None)
         
+        # 🎯 NEW: Extract complete original entities to preserve hybrid query structure
+        original_entities = self._extract_complete_entities_from_history(history)
+        original_genres = []
+        original_moods = []
+        original_intent = None
+        
+        if original_entities:
+            # Try multiple formats for genre extraction
+            
+            # Format 1: Direct genres structure (new format)
+            if 'genres' in original_entities:
+                genres_info = original_entities.get('genres', {})
+                if isinstance(genres_info, dict):
+                    # Extract from primary/secondary structure
+                    primary_genres = genres_info.get('primary', [])
+                    secondary_genres = genres_info.get('secondary', [])
+                    
+                    # Handle both string and dict formats
+                    for genre_item in primary_genres + secondary_genres:
+                        if isinstance(genre_item, dict) and 'name' in genre_item:
+                            original_genres.append(genre_item['name'])
+                        elif isinstance(genre_item, str):
+                            original_genres.append(genre_item)
+                elif isinstance(genres_info, list):
+                    # Direct list of genres
+                    original_genres.extend(genres_info)
+            
+            # Format 2: musical_entities nested structure (legacy format)
+            musical_entities = original_entities.get("musical_entities", {})
+            if musical_entities and 'genres' in musical_entities:
+                genres_info = musical_entities.get("genres", {})
+                if isinstance(genres_info, dict):
+                    primary_genres = genres_info.get("primary", [])
+                    secondary_genres = genres_info.get("secondary", [])
+                    
+                    for genre_item in primary_genres + secondary_genres:
+                        if isinstance(genre_item, dict) and 'name' in genre_item:
+                            original_genres.append(genre_item['name'])
+                        elif isinstance(genre_item, str):
+                            original_genres.append(genre_item)
+            
+            # Extract original moods (similar structure)
+            if 'moods' in original_entities:
+                moods_info = original_entities.get('moods', {})
+                if isinstance(moods_info, dict):
+                    primary_moods = moods_info.get('primary', [])
+                    for mood_item in primary_moods:
+                        if isinstance(mood_item, dict) and 'name' in mood_item:
+                            original_moods.append(mood_item['name'])
+                        elif isinstance(mood_item, str):
+                            original_moods.append(mood_item)
+            
+            # Also check contextual_entities for moods (legacy format)
+            contextual_entities = original_entities.get("contextual_entities", {})
+            if contextual_entities and 'moods' in contextual_entities:
+                moods_info = contextual_entities.get("moods", {})
+                for mood_type, mood_list in moods_info.items():
+                    if isinstance(mood_list, list):
+                        original_moods.extend(mood_list)
+            
+            # Extract original intent if available
+            if 'intent' in original_entities:
+                intent_info = original_entities.get('intent', {})
+                if isinstance(intent_info, dict):
+                    original_intent = intent_info.get("primary", None)
+                elif isinstance(intent_info, str):
+                    original_intent = intent_info
+            
+            self.logger.info(f"🔍 PRESERVING ORIGINAL CONTEXT: genres={original_genres}, moods={original_moods}, intent={original_intent}")
+        
         base_override = {
             'is_followup': True,
             'target_entity': target_entity,
             'confidence': confidence,
             'intent_override': None,
             'style_modifier': style_modifier,
-            'constraint_overrides': None
+            'constraint_overrides': None,
+            # 🎯 NEW: Preserve original query structure
+            'preserved_entities': original_entities,
+            'preserved_genres': original_genres,
+            'preserved_moods': original_moods,
+            'original_intent': original_intent
         }
         
         if followup_type == 'artist_style_refinement':
-            # 🔧 NEW: Artist-style refinement handling
+            # 🔧 ENHANCED: Artist-style refinement with preserved context
             base_override.update({
                 'intent_override': 'artist_style_refinement',
                 'style_modifier': style_modifier,
@@ -206,33 +291,53 @@ class ContextAwareIntentAnalyzer:
                     'target_artist_priority': True,
                     'style_filtering': style_modifier,
                     'max_per_artist': {target_entity: 8} if target_entity else {},
-                    'fallback_similar_style': True
+                    'fallback_similar_style': True,
+                    # 🎯 NEW: Preserve original genre filters
+                    'required_genres': original_genres,
+                    'required_moods': original_moods
                 }
             })
             
             self.logger.info(
-                f"🎵 Artist-style refinement detected: {target_entity} + {style_modifier}"
+                f"🎵 Artist-style refinement detected: {target_entity} + {style_modifier} + preserved genres: {original_genres}"
             )
             
         elif followup_type == 'artist_deep_dive':
-            # Existing artist deep dive logic
+            # 🔧 ENHANCED: Artist deep dive with preserved hybrid context
+            constraint_overrides = {
+                'diversity_limits': {'same_artist_limit': 10, 'min_different_artists': 1}
+            }
+            
+            # 🎯 CRITICAL: If original query had genre filters, preserve them!
+            if original_genres:
+                constraint_overrides['required_genres'] = original_genres
+                constraint_overrides['hybrid_query'] = True
+                # Change intent to preserve hybrid behavior
+                base_override['intent_override'] = 'hybrid_artist_genre'  # NEW: Hybrid intent for artist+genre
+                self.logger.info(f"🎯 HYBRID FOLLOW-UP: Preserving artist={target_entity} + genres={original_genres}")
+            else:
+                base_override['intent_override'] = 'by_artist'  # ✅ FIXED: Use by_artist for "More tracks"
+                self.logger.info(f"🎯 Artist deep dive detected: {target_entity} - Using by_artist intent")
+            
+            # Also preserve moods if present
+            if original_moods:
+                constraint_overrides['required_moods'] = original_moods
+                
+            base_override['constraint_overrides'] = constraint_overrides
+            
+        elif followup_type == 'style_continuation':
+            # 🔧 ENHANCED: Style continuation with preserved context
             base_override.update({
-                'intent_override': 'artist_similarity',
+                'intent_override': 'style_continuation',
                 'constraint_overrides': {
-                    'diversity_limits': {'same_artist_limit': 10, 'min_different_artists': 1}
+                    'style_consistency_weight': 0.8,
+                    # 🎯 NEW: Preserve original filters for better continuity
+                    'required_genres': original_genres,
+                    'required_moods': original_moods
                 }
             })
             
-            self.logger.info(f"🎯 Artist deep dive detected: {target_entity}")
-            
-        elif followup_type == 'style_continuation':
-            # Existing style continuation logic
-            base_override.update({
-                'intent_override': 'style_continuation',
-                'constraint_overrides': {'style_consistency_weight': 0.8}
-            })
-            
-            self.logger.info("🎶 Style continuation detected")
+            self.logger.info(f"🎶 Style continuation detected with preserved context: genres={original_genres}, moods={original_moods}")
         
         return base_override
     
@@ -269,25 +374,34 @@ class ContextAwareIntentAnalyzer:
                 potential_artist = match.group(1).strip()
                 style_modifier = match.group(2).strip()
                 
-                # Validate artist is from previous context
-                if any(potential_artist.lower() in prev_artist.lower() 
-                       for prev_artist in previous_artists):
-                    
-                    self.logger.info(f"🔧 Regex fallback: artist-style refinement {potential_artist} + {style_modifier}")
+                # 🔧 STRICTER VALIDATION: Exact artist match required (not partial)
+                artist_matches = False
+                for prev_artist in previous_artists:
+                    # Check for exact match (case insensitive) or very close match
+                    if (potential_artist.lower() == prev_artist.lower() or 
+                        potential_artist.lower() in prev_artist.lower() and len(potential_artist) > 3):
+                        artist_matches = True
+                        matched_artist = prev_artist
+                        break
+                
+                if artist_matches:
+                    self.logger.info(f"🔧 Regex fallback: artist-style refinement {potential_artist} -> {matched_artist} + {style_modifier}")
                     
                     return {
                         'is_followup': True,
                         'intent_override': 'artist_style_refinement',
-                        'target_entity': potential_artist,
+                        'target_entity': matched_artist,  # Use the exact previous artist name
                         'style_modifier': style_modifier,
                         'confidence': 0.8,  # Lower confidence for regex
                         'constraint_overrides': {
                             'target_artist_priority': True,
                             'style_filtering': style_modifier,
-                            'max_per_artist': {potential_artist: 8},
+                            'max_per_artist': {matched_artist: 8},
                             'fallback_similar_style': True
                         }
                     }
+                else:
+                    self.logger.info(f"🔧 Regex fallback: Artist '{potential_artist}' not found in previous artists {previous_artists} for style refinement - NOT a followup")
         
         # Existing simple followup patterns
         simple_more_patterns = [
@@ -303,28 +417,108 @@ class ContextAwareIntentAnalyzer:
             if match:
                 potential_artist = match.group(1).strip()
                 
-                if any(potential_artist.lower() in prev_artist.lower() 
-                       for prev_artist in previous_artists):
-                    
-                    self.logger.info(f"🔧 Regex fallback: simple artist followup {potential_artist}")
+                # 🔧 STRICTER VALIDATION: Exact artist match required (not partial)
+                artist_matches = False
+                for prev_artist in previous_artists:
+                    # Check for exact match (case insensitive) or very close match
+                    if (potential_artist.lower() == prev_artist.lower() or 
+                        potential_artist.lower() in prev_artist.lower() and len(potential_artist) > 3):
+                        artist_matches = True
+                        matched_artist = prev_artist
+                        break
+                
+                if artist_matches:
+                    self.logger.info(f"🔧 Regex fallback: simple artist followup {potential_artist} -> {matched_artist}")
                     
                     return {
                         'is_followup': True,
                         'intent_override': 'artist_similarity',
-                        'target_entity': potential_artist,
+                        'target_entity': matched_artist,  # Use the exact previous artist name
                         'style_modifier': None,
                         'confidence': 0.9,
                         'constraint_overrides': {
                             'diversity_limits': {'same_artist_limit': 10, 'min_different_artists': 1}
                         }
                     }
+                else:
+                    self.logger.info(f"🔧 Regex fallback: Artist '{potential_artist}' not found in previous artists {previous_artists} - NOT a followup")
         
         return default_result
     
+    def _extract_complete_entities_from_history(self, conversation_history: List[Dict]) -> Dict[str, Any]:
+        """Extract complete entities structure from conversation history including genres and constraints."""
+        if not conversation_history:
+            return {}
+        
+        # Get the most recent entry with entities
+        for entry in reversed(conversation_history):
+            # Check for the standard extracted_entities format
+            if 'extracted_entities' in entry:
+                entities = entry['extracted_entities']
+                self.logger.debug(f"🔍 Found complete entities in history: {entities}")
+                return entities
+            
+            # Also check for entities stored directly
+            elif 'entities' in entry:
+                entities = entry['entities']
+                self.logger.debug(f"🔍 Found entities in history: {entities}")
+                return entities
+        
+        # If no explicit entities found, try to reconstruct from query analysis
+        # This handles cases where the conversation history doesn't have preserved entities
+        for entry in reversed(conversation_history):
+            query = entry.get('query', '')
+            
+            # Look for explicit genre mentions in original queries
+            if 'r&b' in query.lower() or 'rb' in query.lower():
+                reconstructed_entities = {
+                    'artists': {'primary': []},
+                    'genres': {'primary': [{'name': 'R&B', 'confidence': 0.8}]},
+                    'tracks': {'primary': []},
+                    'moods': {'primary': []}
+                }
+                
+                # Extract artist names from the query
+                if 'michael jackson' in query.lower():
+                    reconstructed_entities['artists']['primary'] = [{'name': 'Michael Jackson', 'confidence': 0.9}]
+                
+                self.logger.info(f"🔧 RECONSTRUCTED entities from query '{query}': {reconstructed_entities}")
+                return reconstructed_entities
+            
+            # Add more genre patterns as needed
+            for genre_pattern, genre_name in [
+                ('jazz', 'Jazz'),
+                ('rock', 'Rock'), 
+                ('pop', 'Pop'),
+                ('electronic', 'Electronic'),
+                ('hip hop', 'Hip Hop'),
+                ('country', 'Country'),
+                ('blues', 'Blues')
+            ]:
+                if genre_pattern in query.lower():
+                    reconstructed_entities = {
+                        'artists': {'primary': []},
+                        'genres': {'primary': [{'name': genre_name, 'confidence': 0.8}]},
+                        'tracks': {'primary': []},
+                        'moods': {'primary': []}
+                    }
+                    self.logger.info(f"🔧 RECONSTRUCTED entities from query '{query}': {reconstructed_entities}")
+                    return reconstructed_entities
+        
+        self.logger.debug("🔍 No complete entities found in conversation history")
+        return {}
+
     def _extract_artists_from_history(self, conversation_history: List[Dict]) -> List[str]:
         """Extract artist names from conversation history."""
         artists = set()
         
+        # First try to get artists from extracted entities
+        complete_entities = self._extract_complete_entities_from_history(conversation_history)
+        if complete_entities:
+            entity_artists = complete_entities.get("musical_entities", {}).get("artists", {}).get("primary", [])
+            artists.update(entity_artists)
+        
+        # Also get artists from recommendations for additional context
         for entry in conversation_history[-3:]:  # Look at last 3 entries
             if 'recommendations' in entry:
                 for rec in entry['recommendations']:
@@ -674,6 +868,20 @@ class EnhancedRecommendationService:
             if hasattr(updated_state, 'error_info') and updated_state.error_info:
                 updates["error_info"] = updated_state.error_info
             
+            # 🔧 CRITICAL FIX: Preserve recently_shown_track_ids through the workflow
+            # LangGraph only preserves fields that are included in node updates
+            
+            # 🔧 DEBUG: Check what we actually received in the state
+            self.logger.info(f"🔧 DISCOVERY DEBUG: recently_shown_track_ids = {getattr(state, 'recently_shown_track_ids', 'NOT_SET')}")
+            self.logger.info(f"🔧 DISCOVERY DEBUG: recently_shown_track_ids type = {type(getattr(state, 'recently_shown_track_ids', None))}")
+            self.logger.info(f"🔧 DISCOVERY DEBUG: hasattr check = {hasattr(state, 'recently_shown_track_ids')}")
+            
+            if hasattr(state, 'recently_shown_track_ids') and state.recently_shown_track_ids:
+                updates["recently_shown_track_ids"] = state.recently_shown_track_ids
+                self.logger.info(f"🔧 DISCOVERY: Preserving {len(state.recently_shown_track_ids)} recently shown track IDs through workflow")
+            else:
+                self.logger.info("🎯 NEW QUERY: No recently shown tracks")
+            
             self.logger.info(f"Discovery node completed, returning {len(updates)} field updates")
             return updates
             
@@ -724,6 +932,12 @@ class EnhancedRecommendationService:
             # Extract error info if present
             if hasattr(updated_state, 'error_info') and updated_state.error_info:
                 updates["error_info"] = updated_state.error_info
+            
+            # 🔧 CRITICAL FIX: Preserve recently_shown_track_ids through the workflow
+            # LangGraph only preserves fields that are included in node updates
+            if hasattr(state, 'recently_shown_track_ids') and state.recently_shown_track_ids:
+                updates["recently_shown_track_ids"] = state.recently_shown_track_ids
+                self.logger.info(f"🔧 PRESERVING: {len(state.recently_shown_track_ids)} recently shown track IDs through workflow")
             
             self.logger.info(f"Judge node completed, returning {len(updates)} field updates")
             return updates
@@ -779,6 +993,40 @@ class EnhancedRecommendationService:
                         'recommendations': previous_recommendations[i] if i < len(previous_recommendations) else []
                     })
         
+        # 🔧 CRITICAL FIX: Also check for chat_context format from UI
+        elif hasattr(request, 'chat_context') and request.chat_context:
+            chat_context = request.chat_context
+            if 'previous_queries' in chat_context:
+                # Convert chat interface format to conversation history format
+                previous_queries = chat_context.get('previous_queries', [])
+                previous_recommendations = chat_context.get('previous_recommendations', [])
+                
+                # Merge conversation history
+                conversation_history = []
+                for i, query in enumerate(previous_queries):
+                    conversation_history.append({
+                        'query': query,
+                        'recommendations': previous_recommendations[i] if i < len(previous_recommendations) else []
+                    })
+                    
+                self.logger.info(f"🔧 CHAT CONTEXT FIX: Loaded {len(conversation_history)} conversations from chat_context")
+            
+        # 🔧 ADDITIONAL FIX: Check if context is nested in request data (common API pattern)
+        elif hasattr(request, '__dict__') and 'chat_context' in request.__dict__:
+            chat_context = request.__dict__['chat_context']
+            if isinstance(chat_context, dict) and 'previous_queries' in chat_context:
+                previous_queries = chat_context.get('previous_queries', [])
+                previous_recommendations = chat_context.get('previous_recommendations', [])
+                
+                conversation_history = []
+                for i, query in enumerate(previous_queries):
+                    conversation_history.append({
+                        'query': query,
+                        'recommendations': previous_recommendations[i] if i < len(previous_recommendations) else []
+                    })
+                    
+                self.logger.info(f"🔧 DICT CONTEXT FIX: Loaded {len(conversation_history)} conversations from request dict")
+        
         # Log conversation history for debugging
         self.logger.info(
             f"Conversation history for followup analysis",
@@ -812,20 +1060,43 @@ class EnhancedRecommendationService:
             confidence=context_override['confidence']
         )
         
-        # Build state for workflow execution
+        # 🚀 CRITICAL FIX: Prepare session context FIRST before state initialization
+        recently_shown_track_ids = []
+        if context_override and self._is_followup_query(context_override):
+            self.logger.info("🔧 EXTRACTION DEBUG: Processing follow-up query")
+            self.logger.info(f"🔧 EXTRACTION DEBUG: conversation_history = {conversation_history}")
+            self.logger.info(f"🔧 EXTRACTION DEBUG: context_override = {context_override}")
+            
+            recently_shown_track_ids = self._extract_recently_shown_tracks(
+                conversation_history, 
+                context_override,
+                None  # Will be populated after state creation if needed
+            )
+            
+            self.logger.info(
+                f"🔧 EXTRACTION DEBUG: Extracted {len(recently_shown_track_ids)} track IDs: "
+                f"{recently_shown_track_ids}"
+            )
+            
+            target_entity = context_override.get('target_entity', 'previous recommendations')
+            self.logger.info(
+                f"🔄 FOLLOW-UP QUERY: Prepared {len(recently_shown_track_ids)} recently shown tracks "
+                f"for '{target_entity}' to avoid duplicates"
+        )
+        
+        # Create workflow state with PRE-POPULATED recently_shown_track_ids
         workflow_state = MusicRecommenderState(
             user_query=request.query,
+            max_recommendations=request.max_recommendations or 10,
+            entities=context_override.get('entities', {}) if context_override else {},
+            conversation_context=session_context,
+            context_override=context_override,
             session_id=request.session_id or "default",
-            max_recommendations=request.max_recommendations,
-            context_override={
-                'is_followup': context_override['is_followup'],
-                'intent_override': context_override['intent_override'],
-                'target_entity': context_override['target_entity'],
-                'confidence': context_override['confidence'],
-                'style_modifier': context_override['style_modifier'],
-                'constraint_overrides': context_override['constraint_overrides']
-            } if context_override['is_followup'] else None
+            recently_shown_track_ids=recently_shown_track_ids  # 🚀 PRE-POPULATED!
         )
+        
+        # 🎯 STATE VALIDATION: Validate state before workflow execution
+        self._validate_state_for_workflow(workflow_state)
         
         try:
             # Execute workflow
@@ -926,7 +1197,9 @@ class EnhancedRecommendationService:
                     'confidence': context_override['confidence'],
                     'style_modifier': context_override['style_modifier'],
                     'constraint_overrides': context_override['constraint_overrides']
-                }
+                },
+                # 🎯 NEW: Preserve extracted entities for follow-up queries
+                extracted_entities=getattr(final_state, 'entities', None) if not isinstance(final_state, dict) else final_state.get('entities', None)
             )
             
             self.logger.info(
@@ -939,24 +1212,229 @@ class EnhancedRecommendationService:
             return response
             
         except Exception as e:
-            self.logger.error("Recommendation generation failed", error=str(e))
+            self.logger.error(f"Error in recommendation workflow: {str(e)}")
+            raise
+
+    def _validate_state_for_workflow(self, state: MusicRecommenderState) -> None:
+        """Validate state has all required data for workflow execution"""
+        if not state.user_query:
+            raise ValueError("user_query is required")
+        
+        if not state.session_id:
+            raise ValueError("session_id is required")
+        
+        # Log state preparation for debugging
+        recently_shown_count = len(state.recently_shown_track_ids or [])
+        self.logger.info(f"🎯 STATE PREPARED: recently_shown={recently_shown_count} tracks")
+        
+        if state.recently_shown_track_ids:
+            self.logger.info("🎯 FOLLOW-UP DETECTED: Will trigger candidate scaling")
+            # Log first few track IDs for debugging
+            sample_ids = state.recently_shown_track_ids[:3]
+            self.logger.debug(f"🎯 SAMPLE TRACK IDS: {sample_ids}")
+        else:
+            self.logger.info("🎯 NEW QUERY: No recently shown tracks")
+
+    def _is_followup_query(self, context_override: Dict[str, Any]) -> bool:
+        """Check if this is a follow-up query that should avoid duplicate recommendations."""
+        if not context_override.get('is_followup'):
+            return False
             
-            # Return fallback recommendations
-            fallback_recommendations = await self._get_fallback_recommendations(
-                request.query,
-                request.max_recommendations
-            )
+        # Follow-up intents that should avoid duplicates
+        followup_intents = [
+            'style_continuation',     # "More like that"
+            'artist_deep_dive',       # "More from [Artist X]"
+            'artist_similarity',      # "More from [Artist X]" (mapped from artist_deep_dive)
+            'artist_style_refinement',  # "More like [Artist] but [modifier]"
+            'by_artist'              # ✅ NEW: "More tracks" after "Music by [Artist]"
+        ]
+        
+        intent_override = context_override.get('intent_override')
+        return intent_override in followup_intents
+    
+    def _extract_recently_shown_tracks(
+        self, 
+        conversation_history: Optional[List[Dict[str, Any]]], 
+        context_override: Dict[str, Any],
+        workflow_state: MusicRecommenderState
+    ) -> List[str]:
+        """Extract track IDs from recent conversation history to avoid duplicates."""
+        if not conversation_history:
+            self.logger.info("🔧 EXTRACT DEBUG: No conversation history provided")
+            return []
+        
+        recently_shown_ids = []
+        intent_override = context_override.get('intent_override')
+        target_entity = context_override.get('target_entity', '')
+        # 🔧 FIX: Handle None target_entity
+        target_entity_lower = target_entity.lower() if target_entity else ''
+        
+        self.logger.info(f"🔧 EXTRACT DEBUG: Processing {len(conversation_history)} conversation turns")
+        self.logger.info(f"🔧 EXTRACT DEBUG: Intent override: {intent_override}")
+        self.logger.info(f"🔧 EXTRACT DEBUG: Target entity: '{target_entity}' (lower: '{target_entity_lower}')")
+        
+        # Limit to recent conversation (last 5 turns)
+        recent_turns = conversation_history[-5:]
+        
+        for i, turn in enumerate(recent_turns):
+            self.logger.info(f"🔧 EXTRACT DEBUG: Turn {i}: {list(turn.keys())}")
             
-            processing_time = asyncio.get_event_loop().time() - start_time
+            if isinstance(turn, dict) and 'recommendations' in turn:
+                recommendations = turn['recommendations']
+                self.logger.info(f"🔧 EXTRACT DEBUG: Turn {i} has {len(recommendations)} recommendations")
+                
+                # 🔧 NEW: Check if this looks like incomplete history from chat interface
+                if len(recommendations) <= 2 and i == 0:  # First turn with very few recommendations
+                    self.logger.warning(f"🔧 EXTRACT DEBUG: Detected incomplete chat interface history ({len(recommendations)} tracks), will try session context fallback")
+                
+                for j, rec in enumerate(recommendations):
+                    if isinstance(rec, dict) and 'artist' in rec and 'title' in rec:
+                        artist = str(rec['artist']).lower().strip()
+                        title = str(rec['title']).lower().strip()
+                        self.logger.info(f"🔧 EXTRACT DEBUG: Rec {j}: artist='{artist}', title='{title}'")
+                    else:
+                        self.logger.info(f"🔧 EXTRACT DEBUG: Skipping rec {j} - missing artist or title")
+                        continue
+                    
+                    # Create track ID using artist::title format
+                    track_id = f"{artist}::{title}"
+                    
+                    # Determine if this track should be included based on intent
+                    should_include = False
+                    
+                    if intent_override == 'style_continuation':
+                        # For style continuation, include ALL previous recommendations to avoid duplicates
+                        # These tracks should be AVOIDED in future recommendations
+                        should_include = True
+                        self.logger.info(f"🔧 EXTRACT DEBUG: Style continuation - avoiding duplicate {track_id}")
+                        
+                    elif intent_override == 'artist_deep_dive':
+                        # Include only tracks by the target artist for artist deep dive
+                        should_include = (artist == target_entity_lower)
+                        self.logger.info(f"🔧 EXTRACT DEBUG: Artist deep dive - artist match: {artist} == {target_entity_lower} = {should_include}")
+                        
+                    elif intent_override == 'artist_similarity':
+                        # Include only tracks by the target artist for artist similarity
+                        should_include = (artist == target_entity_lower)
+                        self.logger.info(f"🔧 EXTRACT DEBUG: Artist similarity - artist match: {artist} == {target_entity_lower} = {should_include}")
+                        
+                    elif intent_override == 'artist_style_refinement':
+                        # Include tracks by the target artist for style refinement
+                        should_include = (artist == target_entity_lower)
+                        self.logger.info(f"🔧 EXTRACT DEBUG: Artist style refinement - artist match: {artist} == {target_entity_lower} = {should_include}")
+                    elif intent_override == 'by_artist':
+                        # ✅ NEW: Include tracks by the target artist for by_artist intent
+                        should_include = (artist == target_entity_lower)
+                        self.logger.info(f"🔧 EXTRACT DEBUG: By artist - artist match: {artist} == {target_entity_lower} = {should_include}")
+                    else:
+                        self.logger.info(f"🔧 EXTRACT DEBUG: Unknown intent '{intent_override}' - not including {track_id}")
+                    
+                    if should_include:
+                        recently_shown_ids.append(track_id)
+                        self.logger.info(f"🔧 EXTRACT DEBUG: ✅ ADDED TO AVOID LIST: {track_id}")
+                    else:
+                        self.logger.info(f"🔧 EXTRACT DEBUG: ❌ EXCLUDED: {track_id}")
+            else:
+                self.logger.info(f"🔧 EXTRACT DEBUG: Turn {i} has no recommendations or invalid format")
+        
+        # 🔧 NEW: Session context fallback if we got very few tracks from chat interface
+        if len(recently_shown_ids) <= 2:
+            self.logger.info(f"🔧 EXTRACT DEBUG: Only {len(recently_shown_ids)} tracks from chat interface, trying session context fallback")
+            session_tracks = self._extract_from_session_context(context_override, workflow_state)
+            if session_tracks:
+                self.logger.info(f"🔧 EXTRACT DEBUG: Found {len(session_tracks)} additional tracks from session context")
+                recently_shown_ids.extend(session_tracks)
+        
+        # Remove duplicates while preserving order
+        unique_ids = []
+        seen = set()
+        for track_id in recently_shown_ids:
+            if track_id not in seen:
+                unique_ids.append(track_id)
+                seen.add(track_id)
+        
+        self.logger.info(f"🔧 EXTRACT DEBUG: Final result: {len(unique_ids)} unique track IDs: {unique_ids}")
+        return unique_ids
+    
+    def _extract_from_session_context(self, context_override: Dict[str, Any], workflow_state: MusicRecommenderState) -> List[str]:
+        """Extract recently shown tracks from backend session context as fallback."""
+        try:
+            intent_override = context_override.get('intent_override')
+            target_entity = context_override.get('target_entity', '')
+            target_entity_lower = target_entity.lower() if target_entity else ''
             
-            return RecommendationResponse(
-                recommendations=fallback_recommendations,
-                strategy_used={"type": "fallback", "reason": str(e)},
-                reasoning=[f"Error occurred: {str(e)}", "Using fallback recommendations"],
-                session_id=request.session_id or "default",
-                processing_time=processing_time,
-                metadata={"error": str(e), "fallback_used": True}
-            )
+            session_context = workflow_state.conversation_context
+            if not session_context:
+                self.logger.info("🔧 SESSION FALLBACK: No session context available in workflow state")
+                return []
+            
+            interaction_history = session_context.get('interaction_history', [])
+            if not interaction_history:
+                self.logger.info("🔧 SESSION FALLBACK: No interaction history in session context")
+                return []
+            
+            self.logger.info(f"🔧 SESSION FALLBACK: Processing {len(interaction_history)} interactions from session context")
+            
+            session_track_ids = []
+            
+            # Look at recent interactions (last 2-3 interactions)
+            recent_interactions = interaction_history[-3:]
+            
+            for i, interaction in enumerate(recent_interactions):
+                self.logger.info(f"🔧 SESSION FALLBACK: Interaction {i}: {list(interaction.keys())}")
+                
+                recommendations = interaction.get('recommendations', [])
+                if recommendations:
+                    self.logger.info(f"🔧 SESSION FALLBACK: Interaction {i} has {len(recommendations)} recommendations")
+                    
+                    for j, rec in enumerate(recommendations):
+                        if isinstance(rec, dict):
+                            # Try different possible formats from session context
+                            artist = rec.get('artist') or rec.get('artist_name', '')
+                            title = rec.get('title') or rec.get('track_name') or rec.get('name', '')
+                            
+                            if artist and title:
+                                artist = str(artist).lower().strip()
+                                title = str(title).lower().strip()
+                                track_id = f"{artist}::{title}"
+                                
+                                # Apply same intent filtering logic
+                                should_include = False
+                                
+                                if intent_override == 'style_continuation':
+                                    should_include = True
+                                elif intent_override in ['artist_deep_dive', 'artist_similarity', 'artist_style_refinement', 'by_artist']:
+                                    should_include = (artist == target_entity_lower)
+                                
+                                if should_include:
+                                    session_track_ids.append(track_id)
+                                    self.logger.info(f"🔧 SESSION FALLBACK: ✅ INCLUDED: {track_id}")
+                                else:
+                                    self.logger.info(f"🔧 SESSION FALLBACK: ❌ EXCLUDED: {track_id}")
+                            else:
+                                self.logger.info(f"🔧 SESSION FALLBACK: Skipping rec {j} - missing artist ({artist}) or title ({title})")
+                else:
+                    self.logger.info(f"🔧 SESSION FALLBACK: Interaction {i} has no recommendations")
+            
+            self.logger.info(f"🔧 SESSION FALLBACK: Found {len(session_track_ids)} tracks from session context")
+            return session_track_ids
+            
+        except Exception as e:
+            self.logger.error(f"🔧 SESSION FALLBACK: Error extracting from session context: {e}")
+            return []
+    
+    async def _save_recommendations_to_history(
+        self, 
+        session_id: str, 
+        recommendations: List[TrackRecommendation]
+    ) -> None:
+        """Save recommendations to conversation history for future duplicate avoidance."""
+        # This could be implemented to persist recommendations
+        # For now, just log the action
+        self.logger.info(
+            f"Would save {len(recommendations)} recommendations to history for session {session_id}"
+        )
+        pass
     
     async def _convert_to_unified_metadata(
         self,

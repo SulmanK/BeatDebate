@@ -9,7 +9,7 @@ Refactored to use dependency injection and shared components, eliminating:
 """
 
 import json
-from typing import Dict, Any
+from typing import Dict, Any, List
 import structlog
 
 from ...models.agent_models import (
@@ -96,15 +96,36 @@ class PlannerAgent(BaseAgent):
         try:
             self.logger.info("Starting planner agent processing")
             
-            # Phase 1: Query Understanding
-            query_understanding = await self._understand_user_query(
-                state.user_query
-            )
-            state.query_understanding = query_understanding
-            
-            # Phase 1.5: Convert understanding to entities structure for agents
-            entities = self._convert_understanding_to_entities(query_understanding)
-            state.entities = entities
+            # 🎯 NEW: Check for context override before query understanding
+            if hasattr(state, 'context_override') and state.context_override:
+                context_override = state.context_override
+                if self._is_followup_with_preserved_context(context_override):
+                    self.logger.info("🎯 Context override detected, using preserved entities and intent")
+                    
+                    # Create QueryUnderstanding from preserved context
+                    state.query_understanding = self._create_understanding_from_context(
+                        state.user_query, context_override
+                    )
+                    
+                    # Create entities structure from context
+                    state.entities = self._create_entities_from_context(context_override)
+                    
+                    # Use preserved understanding for task analysis
+                    query_understanding = state.query_understanding
+                else:
+                    # Context override exists but not a preserved context case - use normal flow
+                    self.logger.info("🔧 Context override exists but not for preserved entities, using normal query understanding")
+                    query_understanding = await self._understand_user_query(state.user_query)
+                    entities = self._convert_understanding_to_entities(query_understanding)
+                    state.query_understanding = query_understanding
+                    state.entities = entities
+            else:
+                # No context override - fresh query understanding
+                self.logger.info("🔧 No context override, using fresh query understanding")
+                query_understanding = await self._understand_user_query(state.user_query)
+                entities = self._convert_understanding_to_entities(query_understanding)
+                state.query_understanding = query_understanding
+                state.entities = entities
             
             # Phase 2: Task Analysis
             task_analysis = await self._analyze_task_complexity(
@@ -489,10 +510,12 @@ Provide enhanced analysis in the specified JSON format."""
         
         # Intent-aware sequences from design document
         intent_sequences = {
+            'by_artist': ['discovery', 'judge'],     # 🔧 NEW: by_artist uses discovery for artist tracks
+            'by_artist_underground': ['discovery', 'judge'],  # 🔧 NEW: underground discovery by artist
             'artist_similarity': ['discovery', 'judge'],
             'discovery': ['discovery', 'judge'],
             'genre_mood': ['genre_mood', 'discovery', 'judge'],
-            'contextual': ['genre_mood', 'judge'],
+            'contextual': ['genre_mood', 'discovery', 'judge'],
             'hybrid': ['discovery', 'genre_mood', 'judge'],
             
             # Legacy compatibility mappings
@@ -744,5 +767,245 @@ Create evaluation framework for this music recommendation task."""
     async def _make_llm_call(
         self, prompt: str, system_prompt: str = None
     ) -> str:
-        """Use shared LLM utilities for LLM calls."""
-        return await self.llm_utils.call_llm(prompt, system_prompt) 
+        """Make an LLM call with the provided prompt."""
+        try:
+            if not self.llm_client:
+                self.logger.warning("No LLM client available")
+                return "{}"
+            
+            response = await self.llm_client.generate_response(
+                prompt, system_prompt=system_prompt
+            )
+            return response
+        except Exception as e:
+            self.logger.error(f"LLM call failed: {e}")
+            return "{}"
+
+    def _is_followup_with_preserved_context(self, context_override: Dict) -> bool:
+        """
+        Check if context override contains preserved entities that should skip query understanding.
+        
+        Following clean architecture principles, this method acts as a domain rule
+        to determine when we should use preserved context vs fresh query understanding.
+        
+        Returns True for follow-ups with preserved entities like:
+        - Artist deep dives with preserved genres ('hybrid_artist_genre')
+        - Style continuations with preserved context ('style_continuation')
+        - Artist refinements with preserved filters ('artist_style_refinement')
+        - Artist similarity follow-ups with target entity ('artist_similarity')
+        """
+        if not isinstance(context_override, dict):
+            return False
+        
+        # Check for follow-up indicators
+        is_followup = context_override.get('is_followup', False)
+        has_preserved_entities = 'preserved_entities' in context_override
+        has_intent_override = 'intent_override' in context_override
+        has_target_entity = context_override.get('target_entity') is not None
+        
+        # Define which intent overrides should use preserved context
+        followup_types_with_context = [
+            'hybrid_artist_genre', 'artist_style_refinement', 'style_continuation', 'by_artist'
+        ]
+        
+        intent_override = context_override.get('intent_override')
+        
+        # Two types of valid follow-ups:
+        # 1. Complex follow-ups with preserved entities (hybrid scenarios)
+        # 2. Simple artist follow-ups with target entity (artist_similarity scenarios)
+        
+        complex_followup = (is_followup and 
+                           has_preserved_entities and 
+                           has_intent_override and
+                           intent_override in followup_types_with_context)
+        
+        simple_artist_followup = (is_followup and
+                                 has_target_entity and
+                                 has_intent_override and
+                                 intent_override in ['artist_similarity', 'by_artist'])
+        
+        result = complex_followup or simple_artist_followup
+        
+        self.logger.debug(
+            "🔍 Context override validation",
+            is_followup=is_followup,
+            has_preserved_entities=has_preserved_entities,
+            has_intent_override=has_intent_override,
+            has_target_entity=has_target_entity,
+            intent_override=intent_override,
+            complex_followup=complex_followup,
+            simple_artist_followup=simple_artist_followup,
+            should_use_context=result
+        )
+        
+        return result
+
+    def _create_understanding_from_context(self, user_query: str, context_override: Dict) -> QueryUnderstanding:
+        """
+        Create QueryUnderstanding from preserved context override.
+        
+        This method implements the domain logic for converting preserved conversation
+        context into a proper QueryUnderstanding object, ensuring consistency with
+        the rest of the system.
+        """
+        preserved_entities = context_override.get('preserved_entities', {})
+        intent_override = context_override.get('intent_override', 'discovery')
+        confidence = context_override.get('confidence', 0.9)
+        target_entity = context_override.get('target_entity')
+        
+        # For artist similarity follow-ups, create entities from target_entity
+        if intent_override == 'artist_similarity' and target_entity and not preserved_entities:
+            # Simple artist follow-up: "More tracks" after "Music by Mk.gee"
+            artists = [target_entity]
+            genres = []
+            moods = []
+            self.logger.info(
+                f"🎯 Artist similarity follow-up: Creating entities from target_entity='{target_entity}'"
+            )
+        else:
+            # Complex follow-up with preserved entities
+            artists = self._extract_entity_names(
+                preserved_entities.get('artists', {}).get('primary', [])
+            )
+            genres = self._extract_entity_names(
+                preserved_entities.get('genres', {}).get('primary', [])
+            )
+            moods = self._extract_entity_names(
+                preserved_entities.get('moods', {}).get('primary', [])
+            )
+        
+        # Map intent override to QueryIntent enum - domain rule mapping
+        intent_mapping = {
+            'hybrid_artist_genre': QueryIntent.HYBRID,
+            'artist_style_refinement': QueryIntent.HYBRID, 
+            'style_continuation': QueryIntent.GENRE_MOOD,
+            'artist_deep_dive': QueryIntent.ARTIST_SIMILARITY,
+            'artist_similarity': QueryIntent.ARTIST_SIMILARITY,  # Similar artists
+            'by_artist': QueryIntent.BY_ARTIST  # ✅ NEW: More tracks by the same artist
+        }
+        
+        intent = intent_mapping.get(intent_override, QueryIntent.DISCOVERY)
+        
+        self.logger.info(
+            f"🎯 Created understanding from context",
+            intent=intent.value,
+            artists=artists,
+            genres=genres,
+            confidence=confidence,
+            override_type=intent_override
+        )
+        
+        return QueryUnderstanding(
+            intent=intent,
+            confidence=confidence,
+            artists=artists,
+            genres=genres,
+            moods=moods,
+            activities=[],
+            original_query=user_query,
+            normalized_query=user_query.lower(),
+            reasoning=f"Context override: {intent_override} follow-up with preserved entities"
+        )
+
+    def _create_entities_from_context(self, context_override: Dict) -> Dict[str, Any]:
+        """
+        Create entities structure from context override.
+        
+        This method transforms preserved conversation context into the standardized
+        entities structure expected by downstream agents, maintaining architectural
+        consistency.
+        """
+        preserved_entities = context_override.get('preserved_entities', {})
+        intent_override = context_override.get('intent_override', 'discovery')
+        target_entity = context_override.get('target_entity')
+        
+        # For artist similarity follow-ups, create entities from target_entity
+        if intent_override == 'artist_similarity' and target_entity and not preserved_entities:
+            # Simple artist follow-up: "More tracks" after "Music by Mk.gee"
+            artists_primary = [target_entity]
+            genres_primary = []
+            moods_primary = []
+            self.logger.info(
+                f"🎯 Artist similarity follow-up: Creating entities structure from target_entity='{target_entity}'"
+            )
+        else:
+            # Complex follow-up with preserved entities
+            # Extract preserved entity data with safe navigation
+            artists_data = preserved_entities.get('artists', {})
+            genres_data = preserved_entities.get('genres', {})
+            moods_data = preserved_entities.get('moods', {})
+            
+            artists_primary = self._extract_entity_names(artists_data.get('primary', []))
+            genres_primary = self._extract_entity_names(genres_data.get('primary', []))
+            moods_primary = self._extract_entity_names(moods_data.get('primary', []))
+        
+        # Convert to proper entities structure following established schema
+        entities = {
+            "musical_entities": {
+                "artists": {
+                    "primary": artists_primary,
+                    "similar_to": []
+                },
+                "genres": {
+                    "primary": genres_primary,
+                    "secondary": []
+                },
+                "tracks": {
+                    "primary": [],
+                    "referenced": []
+                },
+                "moods": {
+                    "primary": moods_primary,
+                    "energy": [],
+                    "emotion": []
+                }
+            },
+            "contextual_entities": {
+                "activities": {
+                    "physical": [],
+                    "mental": [],
+                    "social": []
+                },
+                "temporal": {
+                    "decades": [],
+                    "periods": []
+                }
+            },
+            "confidence_scores": {
+                "overall": context_override.get('confidence', 0.9)
+            },
+            "extraction_method": "context_override_preserved",
+            "intent_analysis": {
+                "intent": intent_override,
+                "confidence": context_override.get('confidence', 0.9),
+                "context_override_applied": True
+            }
+        }
+        
+        self.logger.info(
+            f"🎯 Created entities from context",
+            artists_count=len(entities['musical_entities']['artists']['primary']),
+            genres_count=len(entities['musical_entities']['genres']['primary']),
+            moods_count=len(entities['musical_entities']['moods']['primary']),
+            extraction_method=entities['extraction_method']
+        )
+        
+        return entities
+
+    def _extract_entity_names(self, entity_list: List) -> List[str]:
+        """
+        Extract names from entity list that may contain dicts or strings.
+        
+        This utility method handles the data transformation needed to work with
+        various entity formats from preserved context.
+        """
+        names = []
+        for item in entity_list:
+            if isinstance(item, dict):
+                # Handle confidence score format: {'name': 'Artist', 'confidence': 0.8}
+                names.append(item.get('name', str(item)))
+            elif isinstance(item, str):
+                names.append(item)
+            else:
+                names.append(str(item))
+        return names 

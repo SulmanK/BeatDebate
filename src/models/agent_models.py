@@ -71,6 +71,12 @@ class MusicRecommenderState(BaseModel):
     entity_reasoning: Annotated[List[Dict], list_append_reducer] = Field(default_factory=list, description="Entity extraction reasoning steps")
     context_decision: Annotated[Optional[Dict[str, Any]], keep_first] = Field(default=None, description="Context analysis decision")
     
+    # 🔧 NEW: History tracking for follow-up queries  
+    recently_shown_track_ids: Optional[List[str]] = Field(
+        default_factory=list, 
+        description="Track IDs recently shown to the user in this session to avoid duplicates in follow-up queries"
+    )
+    
     # Advocate phase - these will be updated by parallel agents
     genre_mood_recommendations: Annotated[List[Dict], list_append_reducer] = Field(default_factory=list, description="GenreMoodAgent recommendations")
     discovery_recommendations: Annotated[List[Dict], list_append_reducer] = Field(default_factory=list, description="DiscoveryAgent recommendations")
@@ -245,6 +251,7 @@ class SystemConfig(BaseModel):
 class QueryIntent(Enum):
     """Primary intent types for music queries."""
     BY_ARTIST = "by_artist"                     # "Music by X" - focus on artist's own tracks
+    BY_ARTIST_UNDERGROUND = "by_artist_underground"  # "Discover underground tracks by X" - focus on artist's deep cuts/b-sides
     ARTIST_SIMILARITY = "artist_similarity"      # "Music like X" - focus on similarity
     DISCOVERY = "discovery"                      # "Something new and different" - focus on novelty
     GENRE_MOOD = "genre_mood"                   # "Upbeat electronic music" - focus on style/vibe

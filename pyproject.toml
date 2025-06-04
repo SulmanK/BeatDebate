@@ -36,6 +36,7 @@ dependencies = [
     "structlog>=23.2.0",
     "rich>=13.7.0",
     "google-generativeai>=0.8.5",
+    "autopep8>=2.3.2",
 ]
 
 [project.optional-dependencies]

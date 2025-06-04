@@ -1498,6 +1498,17 @@ RESPOND ONLY with valid JSON. Be **GENEROUS** with matches that show clear {targ
                 for track_info in tracks_to_check
             }
 
+    async def get_similar_artists(self, artist: str, limit: int = 10) -> List[Any]:
+        """Get similar artists from Last.fm API."""
+        try:
+            response = await self.lastfm_client.get_similar_artists(artist, limit=limit)
+            if response and hasattr(response, 'artists'):
+                return response.artists[:limit]
+            return []
+        except Exception as e:
+            self.logger.warning(f"Failed to get similar artists for {artist}: {e}")
+            return []
+
 
 # Global API service instance
 _global_api_service: Optional[APIService] = None

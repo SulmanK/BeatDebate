@@ -16,6 +16,13 @@ import requests
 from .response_formatter import ResponseFormatter
 from .planning_display import PlanningDisplay
 
+# Import fallback service components
+from ..services.llm_fallback_service import (
+    LLMFallbackService, 
+    FallbackRequest, 
+    FallbackTrigger
+)
+
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -78,6 +85,7 @@ class BeatDebateChatInterface:
     - Audio preview integration
     - Conversation history management
     - Last.fm player embeds
+    - LLM fallback for unknown intents
     """
     
     def __init__(self, backend_url: str = "http://localhost:8000"):
@@ -93,10 +101,49 @@ class BeatDebateChatInterface:
         self.session_id = str(uuid.uuid4())
         self.conversation_history: List[Dict[str, Any]] = []
         
+        # Initialize fallback service
+        self.fallback_service = None
+        self._initialize_fallback_service()
+        
         logger.info(
             f"BeatDebate Chat Interface initialized with session: "
-            f"{self.session_id}"
+            f"{self.session_id}, fallback_available: {self.fallback_service is not None}"
         )
+    
+    def _initialize_fallback_service(self) -> None:
+        """Initialize the LLM fallback service."""
+        try:
+            # Import Gemini client creation function
+            from ..services.enhanced_recommendation_service import create_gemini_client
+            from ..api.rate_limiter import UnifiedRateLimiter
+            import os
+            
+            # Get Gemini API key
+            gemini_api_key = os.getenv('GEMINI_API_KEY', 'demo_gemini_key')
+            
+            if gemini_api_key and gemini_api_key != 'demo_gemini_key':
+                # Create Gemini client
+                gemini_client = create_gemini_client(gemini_api_key)
+                
+                if gemini_client:
+                    # Create rate limiter for fallback service
+                    rate_limiter = UnifiedRateLimiter.for_gemini(calls_per_minute=8)
+                    
+                    # Initialize fallback service
+                    self.fallback_service = LLMFallbackService(
+                        gemini_client=gemini_client,
+                        rate_limiter=rate_limiter
+                    )
+                    
+                    logger.info("LLM fallback service initialized successfully")
+                else:
+                    logger.warning("Failed to create Gemini client for fallback service")
+            else:
+                logger.warning("No valid Gemini API key found, fallback service disabled")
+                
+        except Exception as e:
+            logger.error(f"Failed to initialize fallback service: {e}")
+            self.fallback_service = None
     
     async def process_message(
         self, 
@@ -105,6 +152,7 @@ class BeatDebateChatInterface:
     ) -> Tuple[str, List[Tuple[str, str]], str]:
         """
         Process user message and return response with track info.
+        Enhanced with fallback support for unknown intents and failures.
         
         Args:
             message: User input message
@@ -119,8 +167,19 @@ class BeatDebateChatInterface:
         logger.info(f"Processing message: {message}")
         
         try:
-            # Get recommendations (now includes chat history)
+            # Primary: Get recommendations from 4-agent system
             recommendations_response = await self._get_recommendations(message)
+            
+            # Check if fallback is needed
+            should_fallback, trigger_reason = self._should_use_fallback(
+                recommendations_response
+            )
+            
+            if should_fallback:
+                logger.info(f"Using LLM fallback due to: {trigger_reason.value}")
+                recommendations_response = await self._get_fallback_recommendations(
+                    message, trigger_reason
+                )
             
             if recommendations_response:
                 # Format the response
@@ -140,7 +199,8 @@ class BeatDebateChatInterface:
                     "recommendations": recommendations_response.get(
                         "recommendations", []
                     ),
-                    "timestamp": time.time()
+                    "timestamp": time.time(),
+                    "used_fallback": recommendations_response.get("fallback_used", False)
                 })
                 
                 # Create Last.fm player HTML for latest recommendations
@@ -150,10 +210,8 @@ class BeatDebateChatInterface:
                 
                 return "", history, lastfm_player_html
             else:
-                error_response = (
-                    "I'm sorry, I couldn't generate recommendations right now. "
-                    "Please try again."
-                )
+                # Final emergency fallback
+                error_response = self._create_emergency_response(message)
                 history.append((message, error_response))
                 
                 return "", history, ""
@@ -164,6 +222,117 @@ class BeatDebateChatInterface:
             history.append((message, error_response))
             
             return "", history, ""
+    
+    def _should_use_fallback(
+        self, 
+        response: Optional[Dict]
+    ) -> Tuple[bool, FallbackTrigger]:
+        """
+        Determine if fallback should be used based on backend response.
+        
+        Args:
+            response: Response from backend recommendation system
+            
+        Returns:
+            Tuple of (should_fallback, trigger_reason)
+        """
+        if response is None:
+            return True, FallbackTrigger.API_ERROR
+        
+        # Check for explicit unknown intent
+        intent = response.get("intent", "").lower()
+        if intent in ["unknown", "unsupported", "fallback"]:
+            return True, FallbackTrigger.UNKNOWN_INTENT
+        
+        # Check for empty recommendations
+        recommendations = response.get("recommendations", [])
+        if not recommendations or len(recommendations) == 0:
+            return True, FallbackTrigger.NO_RECOMMENDATIONS
+        
+        # Check for error indicators
+        if response.get("error") or response.get("detail"):
+            return True, FallbackTrigger.API_ERROR
+        
+        return False, None
+    
+    async def _get_fallback_recommendations(
+        self, 
+        query: str, 
+        trigger_reason: FallbackTrigger
+    ) -> Optional[Dict[str, Any]]:
+        """
+        Get fallback recommendations from LLM service.
+        
+        Args:
+            query: User query
+            trigger_reason: Reason fallback was triggered
+            
+        Returns:
+            Fallback recommendations response or None if unavailable
+        """
+        if not self.fallback_service:
+            logger.warning("Fallback service not available")
+            return None
+        
+        try:
+            # Prepare fallback request
+            fallback_request = FallbackRequest(
+                query=query,
+                session_id=self.session_id,
+                chat_context=self._get_chat_context(),
+                trigger_reason=trigger_reason,
+                max_recommendations=10
+            )
+            
+            # Get fallback recommendations
+            fallback_response = await self.fallback_service.get_fallback_recommendations(
+                fallback_request
+            )
+            
+            # Add fallback disclaimer to explanation
+            if fallback_response and fallback_response.get("fallback_used"):
+                original_explanation = fallback_response.get("explanation", "")
+                fallback_explanation = (
+                    f"**⚠️ DEFAULTING TO REGULAR LLM** - This query is outside our "
+                    f"specialized 4-agent system's scope.\n\n{original_explanation}"
+                )
+                fallback_response["explanation"] = fallback_explanation
+            
+            return fallback_response
+            
+        except Exception as e:
+            logger.error(f"Fallback service failed: {e}")
+            return None
+    
+    def _get_chat_context(self) -> Optional[Dict]:
+        """Get chat context for fallback requests."""
+        if not self.conversation_history:
+            return None
+        
+        # Get last 3 interactions for context
+        recent_history = self.conversation_history[-3:]
+        return {
+            "previous_queries": [
+                h["user_message"] for h in recent_history
+            ],
+            "previous_recommendations": [
+                h.get("recommendations", [])
+                for h in recent_history
+            ]
+        }
+    
+    def _create_emergency_response(self, query: str) -> str:
+        """Create emergency response when all systems fail."""
+        return (
+            "**🚨 SYSTEM TEMPORARILY UNAVAILABLE**\n\n"
+            f"I apologize, but I'm unable to process your request for '{query}' "
+            "at the moment. Our recommendation systems are experiencing issues.\n\n"
+            "**Please try:**\n"
+            "- Waiting a few moments and trying again\n"
+            "- Simplifying your query (e.g., 'music like [artist name]')\n"
+            "- Checking your internet connection\n\n"
+            "We're working to restore full functionality. Thank you for your patience! 🎵"
+        )
     
     async def _get_planning_strategy(self, query: str) -> Optional[Dict]:
         """Get planning strategy from backend."""

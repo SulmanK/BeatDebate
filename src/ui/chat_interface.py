@@ -20,8 +20,14 @@ from .planning_display import PlanningDisplay
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Query examples from design document
+# Query examples from intent-aware recommendation system design document
 QUERY_EXAMPLES = {
+    "By Artist": [
+        "Music by Mk.gee",
+        "Give me tracks by Radiohead", 
+        "Play some Beatles songs",
+        "Mk.gee songs"
+    ],
     "Artist Similarity": [
         "Music like Mk.gee",
         "Similar artists to BROCKHAMPTON", 
@@ -30,7 +36,8 @@ QUERY_EXAMPLES = {
     "Discovery": [
         "Find me underground electronic music",
         "Something completely new and different",
-        "Hidden gems in ambient music"
+        "Hidden gems in ambient music",
+        "Discover underground tracks by Kendrick Lamar"
     ],
     "Genre/Mood": [
         "Upbeat electronic music",
@@ -46,7 +53,17 @@ QUERY_EXAMPLES = {
         "Music like Kendrick Lamar but jazzy",
         "Chill songs like Bon Iver",
         "Electronic music similar to Aphex Twin",
-        "Study music like Max Richter"
+        "Study music like Max Richter",
+        "Find me underground indie rock",
+        "Upbeat indie rock with electronic elements"
+    ],
+    "Follow-ups": [
+        "More tracks",
+        "More like that",
+        "Similar to these",
+        "More from this artist",
+        "More underground like these",
+        "More for studying like these"
     ]
 }
 
@@ -528,18 +545,36 @@ class BeatDebateChatInterface:
                 with gr.Column(elem_classes=["header-section"]):
                     gr.Markdown("""
                     # 🎵 BeatDebate
-                    ### AI Music Discovery with Intent-Aware Recommendations
+                    ### AI Music Discovery with Intent-Aware 4-Agent Recommendation System
                     
-                    Discover perfect tracks using our 4-agent AI system that understands your musical intent!
+                    **🏆 AgentX Competition Entry** | **🚀 Advanced Agentic Planning System**
+                    
+                    Discover perfect tracks using our sophisticated 4-agent AI system that understands your musical intent and collaborates intelligently!
+                    
+                    **🔗 Competition Links:** [AgentX Submission](https://agentx.ai) • [GitHub Repository](https://github.com/beatdebate/beatdebate)
+                    
+
                     """)
                 
                 # Query examples prominently displayed
                 with gr.Column(elem_classes=["examples-section"]):
                     gr.Markdown("## 💡 **Try These Examples** - Click any to get started!")
+                    gr.Markdown("*Our system recognizes all these intent types and optimizes agent coordination accordingly*")
                     
                     example_buttons = []
                     
                     with gr.Row():
+                        with gr.Column(scale=1):
+                            gr.Markdown("**🎯 By Artist**")
+                            for example in QUERY_EXAMPLES["By Artist"]:
+                                btn = gr.Button(
+                                    example, 
+                                    elem_classes=["example-chip"],
+                                    size="sm",
+                                    variant="secondary"
+                                )
+                                example_buttons.append((btn, example))
+                        
                         with gr.Column(scale=1):
                             gr.Markdown("**🎯 Artist Similarity**")
                             for example in QUERY_EXAMPLES["Artist Similarity"]:
@@ -552,7 +587,7 @@ class BeatDebateChatInterface:
                                 example_buttons.append((btn, example))
                         
                         with gr.Column(scale=1):
-                            gr.Markdown("**🔍 Discovery**")
+                            gr.Markdown("**🎯 Discovery**")
                             for example in QUERY_EXAMPLES["Discovery"]:
                                 btn = gr.Button(
                                     example,
@@ -561,7 +596,8 @@ class BeatDebateChatInterface:
                                     variant="secondary"
                                 )
                                 example_buttons.append((btn, example))
-                        
+                    
+                    with gr.Row():
                         with gr.Column(scale=1):
                             gr.Markdown("**🎵 Genre/Mood**")
                             for example in QUERY_EXAMPLES["Genre/Mood"]:
@@ -583,9 +619,9 @@ class BeatDebateChatInterface:
                                     variant="secondary"
                                 )
                                 example_buttons.append((btn, example))
-                
+
                         with gr.Column(scale=1):
-                            gr.Markdown("**📍 Hybrid**")
+                            gr.Markdown("**🎭 Hybrid Queries**")
                             for example in QUERY_EXAMPLES["Hybrid"]:
                                 btn = gr.Button(
                                     example,

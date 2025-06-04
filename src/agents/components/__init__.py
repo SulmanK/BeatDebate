@@ -6,9 +6,10 @@ This module contains reusable components that eliminate duplication across agent
 - Shared LLM utilities  
 - Entity extraction utilities
 - Query analysis utilities
+- Modular scoring system (now in scoring/ subdirectory)
 """
 
-from .quality_scorer import ComprehensiveQualityScorer as QualityScorer
+from .scoring import ComprehensiveQualityScorer as QualityScorer
 from .unified_candidate_generator import UnifiedCandidateGenerator
 from .llm_utils import LLMUtils
 from .entity_extraction_utils import EntityExtractionUtils

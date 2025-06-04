@@ -55,7 +55,7 @@ class RankingLogic:
             Ranked list of (track, scores) tuples
         """
         try:
-            from ..components.quality_scorer import QualityScorer
+            from ..components import QualityScorer
             
             # Initialize quality scorer for intent-aware scoring
             quality_scorer = QualityScorer()

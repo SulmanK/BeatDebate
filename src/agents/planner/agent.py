@@ -87,6 +87,8 @@ class PlannerAgent(BaseAgent):
         """
         Process user query to create planning strategy.
         
+        Phase 2: Simplified to use effective intent from IntentOrchestrationService.
+        
         Args:
             state: Current recommender state
             
@@ -94,34 +96,20 @@ class PlannerAgent(BaseAgent):
             Updated state with planning strategy
         """
         try:
-            self.logger.info("Starting planner agent processing")
+            self.logger.info("Starting planner agent processing (Phase 2)")
             
-            # 🎯 NEW: Check for context override before query understanding
-            if hasattr(state, 'context_override') and state.context_override:
-                context_override = state.context_override
-                if self._is_followup_with_preserved_context(context_override):
-                    self.logger.info("🎯 Context override detected, using preserved entities and intent")
-                    
-                    # Create QueryUnderstanding from preserved context
-                    state.query_understanding = self._create_understanding_from_context(
-                        state.user_query, context_override
-                    )
-                    
-                    # Create entities structure from context
-                    state.entities = self._create_entities_from_context(context_override)
-                    
-                    # Use preserved understanding for task analysis
-                    query_understanding = state.query_understanding
-                else:
-                    # Context override exists but not a preserved context case - use normal flow
-                    self.logger.info("🔧 Context override exists but not for preserved entities, using normal query understanding")
-                    query_understanding = await self._understand_user_query(state.user_query)
-                    entities = self._convert_understanding_to_entities(query_understanding)
-                    state.query_understanding = query_understanding
-                    state.entities = entities
+            # Phase 2: Use effective intent if available, otherwise fall back to query understanding
+            if hasattr(state, 'effective_intent') and state.effective_intent:
+                self.logger.info("🎯 Phase 2: Using effective intent from IntentOrchestrationService")
+                query_understanding = self._create_understanding_from_effective_intent(
+                    state.user_query, state.effective_intent
+                )
+                entities = self._create_entities_from_effective_intent(state.effective_intent)
+                state.query_understanding = query_understanding
+                state.entities = entities
             else:
-                # No context override - fresh query understanding
-                self.logger.info("🔧 No context override, using fresh query understanding")
+                # Fallback: Use traditional query understanding for backward compatibility
+                self.logger.info("🔧 Phase 2: No effective intent available, using traditional query understanding")
                 query_understanding = await self._understand_user_query(state.user_query)
                 entities = self._convert_understanding_to_entities(query_understanding)
                 state.query_understanding = query_understanding
@@ -484,6 +472,13 @@ Provide enhanced analysis in the specified JSON format."""
                 ),
                 'fallback_strategies': self._create_fallback_strategies(
                     understanding
+                ),
+                # Phase 3: Candidate pool persistence strategy
+                'generate_large_pool': self._should_generate_large_pool(
+                    understanding, task_analysis
+                ),
+                'pool_size_multiplier': self._determine_pool_size_multiplier(
+                    understanding, task_analysis
                 )
             }
             
@@ -640,6 +635,69 @@ Provide enhanced analysis in the specified JSON format."""
         ]
         
         return fallbacks
+    
+    def _should_generate_large_pool(
+        self, understanding: QueryUnderstanding, task_analysis: Dict[str, Any]
+    ) -> bool:
+        """
+        Determine if a large candidate pool should be generated for follow-up queries.
+        
+        Phase 3: This method decides when to generate 3x more candidates for persistence.
+        
+        Args:
+            understanding: Query understanding results
+            task_analysis: Task complexity analysis
+            
+        Returns:
+            True if large pool should be generated
+        """
+        intent = understanding.intent.value
+        
+        # Intents that benefit from large pools for follow-ups
+        pool_beneficial_intents = ['by_artist', 'artist_similarity', 'genre_exploration', 'discovery']
+        
+        # Generate large pool if:
+        # 1. Intent benefits from pools
+        # 2. High confidence query (likely to have follow-ups)
+        # 3. Not a follow-up query itself (check if this is original)
+        
+        if intent in pool_beneficial_intents and understanding.confidence > 0.7:
+            self.logger.info(
+                f"Phase 3: Large pool generation recommended for intent '{intent}' "
+                f"with confidence {understanding.confidence}"
+            )
+            return True
+        
+        return False
+    
+    def _determine_pool_size_multiplier(
+        self, understanding: QueryUnderstanding, task_analysis: Dict[str, Any]
+    ) -> int:
+        """
+        Determine the multiplier for candidate pool size.
+        
+        Phase 3: This method determines how much larger the pool should be.
+        
+        Args:
+            understanding: Query understanding results
+            task_analysis: Task complexity analysis
+            
+        Returns:
+            Pool size multiplier (default 3)
+        """
+        intent = understanding.intent.value
+        confidence = understanding.confidence
+        
+        # Higher multiplier for high-confidence artist queries (more likely to have follow-ups)
+        if intent in ['by_artist', 'artist_similarity'] and confidence > 0.8:
+            return 4  # 4x larger pool for artist queries
+        
+        # Standard multiplier for other pool-beneficial intents
+        if intent in ['genre_exploration', 'discovery']:
+            return 3  # 3x larger pool
+        
+        # Default (no large pool)
+        return 1
     
     async def _plan_agent_coordination(
         self, user_query: str, task_analysis: Dict[str, Any]
@@ -1008,4 +1066,211 @@ Create evaluation framework for this music recommendation task."""
                 names.append(item)
             else:
                 names.append(str(item))
-        return names 
+        return names
+    
+    # Phase 2: New methods for handling effective intent from IntentOrchestrationService
+    
+    def _create_understanding_from_effective_intent(
+        self, user_query: str, effective_intent: Dict[str, Any]
+    ) -> QueryUnderstanding:
+        """
+        Create QueryUnderstanding from effective intent provided by IntentOrchestrationService.
+        
+        Phase 2: Simplified approach that trusts the intent orchestrator's resolution.
+        """
+        intent_str = effective_intent.get('intent', 'discovery')
+        entities = effective_intent.get('entities', {})
+        confidence = effective_intent.get('confidence', 0.8)
+        
+        # Extract entities from effective intent
+        artists = self._extract_artists_from_effective_intent(entities)
+        genres = self._extract_genres_from_effective_intent(entities)
+        moods = self._extract_moods_from_effective_intent(entities)
+        activities = self._extract_activities_from_effective_intent(entities)
+        
+        # Map intent string to QueryIntent enum
+        intent_mapping = {
+            'artist_similarity': QueryIntent.ARTIST_SIMILARITY,
+            'genre_exploration': QueryIntent.GENRE_MOOD,
+            'mood_matching': QueryIntent.GENRE_MOOD,
+            'activity_context': QueryIntent.GENRE_MOOD,
+            'discovery': QueryIntent.DISCOVERY,
+            'hybrid': QueryIntent.HYBRID,
+            'by_artist': QueryIntent.BY_ARTIST
+        }
+        
+        intent = intent_mapping.get(intent_str, QueryIntent.DISCOVERY)
+        
+        reasoning = "Phase 2: Effective intent from IntentOrchestrationService"
+        if effective_intent.get('is_followup'):
+            reasoning += f" (follow-up: {effective_intent.get('followup_type', 'unknown')})"
+        
+        self.logger.info(
+            "Phase 2: Created understanding from effective intent",
+            intent=intent.value,
+            artists=artists,
+            genres=genres,
+            confidence=confidence,
+            is_followup=effective_intent.get('is_followup', False)
+        )
+        
+        return QueryUnderstanding(
+            intent=intent,
+            confidence=confidence,
+            artists=artists,
+            genres=genres,
+            moods=moods,
+            activities=activities,
+            original_query=user_query,
+            normalized_query=user_query.lower(),
+            reasoning=reasoning
+        )
+    
+    def _create_entities_from_effective_intent(self, effective_intent: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Create entities structure from effective intent.
+        
+        Phase 2: Simplified approach that uses the entities resolved by IntentOrchestrationService.
+        """
+        entities = effective_intent.get('entities', {})
+        
+        # Extract entities using helper methods
+        artists = self._extract_artists_from_effective_intent(entities)
+        genres = self._extract_genres_from_effective_intent(entities)
+        moods = self._extract_moods_from_effective_intent(entities)
+        activities = self._extract_activities_from_effective_intent(entities)
+        
+        # Create standardized entities structure
+        result = {
+            "musical_entities": {
+                "artists": {
+                    "primary": artists,
+                    "similar_to": []
+                },
+                "genres": {
+                    "primary": genres,
+                    "secondary": []
+                },
+                "tracks": {
+                    "primary": [],
+                    "referenced": []
+                },
+                "moods": {
+                    "primary": moods,
+                    "energy": [],
+                    "emotion": []
+                }
+            },
+            "contextual_entities": {
+                "activities": {
+                    "physical": activities,
+                    "mental": [],
+                    "social": []
+                },
+                "temporal": {
+                    "decades": [],
+                    "periods": []
+                }
+            },
+            "confidence_scores": {
+                "overall": effective_intent.get('confidence', 0.8)
+            },
+            "extraction_method": "effective_intent_phase2",
+            "intent_analysis": {
+                "intent": effective_intent.get('intent', 'discovery'),
+                "confidence": effective_intent.get('confidence', 0.8),
+                "is_followup": effective_intent.get('is_followup', False),
+                "followup_type": effective_intent.get('followup_type'),
+                "preserves_original_context": effective_intent.get('preserves_original_context', False)
+            }
+        }
+        
+        self.logger.info(
+            "Phase 2: Created entities from effective intent",
+            artists_count=len(artists),
+            genres_count=len(genres),
+            moods_count=len(moods),
+            is_followup=effective_intent.get('is_followup', False)
+        )
+        
+        return result
+    
+    def _extract_artists_from_effective_intent(self, entities: Dict[str, Any]) -> List[str]:
+        """Extract artist names from effective intent entities."""
+        artists = []
+        
+        # Handle different entity structures
+        if 'artists' in entities:
+            artist_data = entities['artists']
+            if isinstance(artist_data, list):
+                artists.extend(self._extract_entity_names(artist_data))
+        
+        # Also check musical_entities structure
+        if 'musical_entities' in entities and 'artists' in entities['musical_entities']:
+            artist_data = entities['musical_entities']['artists']
+            if isinstance(artist_data, dict) and 'primary' in artist_data:
+                artists.extend(self._extract_entity_names(artist_data['primary']))
+            elif isinstance(artist_data, list):
+                artists.extend(self._extract_entity_names(artist_data))
+        
+        return list(set(artists))  # Remove duplicates
+    
+    def _extract_genres_from_effective_intent(self, entities: Dict[str, Any]) -> List[str]:
+        """Extract genre names from effective intent entities."""
+        genres = []
+        
+        if 'genres' in entities:
+            genre_data = entities['genres']
+            if isinstance(genre_data, dict):
+                for genre_list in [genre_data.get('primary', []), genre_data.get('secondary', [])]:
+                    genres.extend(self._extract_entity_names(genre_list))
+            elif isinstance(genre_data, list):
+                genres.extend(self._extract_entity_names(genre_data))
+        
+        # Also check musical_entities structure
+        if 'musical_entities' in entities and 'genres' in entities['musical_entities']:
+            genre_data = entities['musical_entities']['genres']
+            if isinstance(genre_data, dict):
+                for genre_list in [genre_data.get('primary', []), genre_data.get('secondary', [])]:
+                    genres.extend(self._extract_entity_names(genre_list))
+        
+        return list(set(genres))  # Remove duplicates
+    
+    def _extract_moods_from_effective_intent(self, entities: Dict[str, Any]) -> List[str]:
+        """Extract mood names from effective intent entities."""
+        moods = []
+        
+        if 'moods' in entities:
+            mood_data = entities['moods']
+            if isinstance(mood_data, dict):
+                for mood_list in [mood_data.get('primary', []), mood_data.get('secondary', [])]:
+                    moods.extend(self._extract_entity_names(mood_list))
+            elif isinstance(mood_data, list):
+                moods.extend(self._extract_entity_names(mood_data))
+        
+        # Also check musical_entities structures
+        if 'musical_entities' in entities and 'moods' in entities['musical_entities']:
+            mood_data = entities['musical_entities']['moods']
+            if isinstance(mood_data, dict):
+                for mood_list in [mood_data.get('primary', []), mood_data.get('energy', []), mood_data.get('emotion', [])]:
+                    moods.extend(self._extract_entity_names(mood_list))
+        
+        return list(set(moods))  # Remove duplicates
+    
+    def _extract_activities_from_effective_intent(self, entities: Dict[str, Any]) -> List[str]:
+        """Extract activity names from effective intent entities."""
+        activities = []
+        
+        if 'activities' in entities:
+            activity_data = entities['activities']
+            if isinstance(activity_data, list):
+                activities.extend(self._extract_entity_names(activity_data))
+        
+        # Also check contextual_entities structure
+        if 'contextual_entities' in entities and 'activities' in entities['contextual_entities']:
+            activity_data = entities['contextual_entities']['activities']
+            if isinstance(activity_data, dict):
+                for activity_list in [activity_data.get('physical', []), activity_data.get('mental', []), activity_data.get('social', [])]:
+                    activities.extend(self._extract_entity_names(activity_list))
+        
+        return list(set(activities))  # Remove duplicates

@@ -45,7 +45,8 @@ class DiscoveryAgent(BaseAgent):
         llm_client,
         api_service: APIService,
         metadata_service: MetadataService,
-        rate_limiter=None
+        rate_limiter=None,
+        session_manager=None
     ):
         """
         Initialize simplified discovery agent with injected dependencies.
@@ -56,6 +57,7 @@ class DiscoveryAgent(BaseAgent):
             api_service: Unified API service
             metadata_service: Unified metadata service
             rate_limiter: Rate limiter for LLM API calls
+            session_manager: SessionManagerService for candidate pool persistence (Phase 3)
         """
         super().__init__(
             config=config, 
@@ -66,7 +68,8 @@ class DiscoveryAgent(BaseAgent):
         )
         
         # Shared components (LLMUtils now initialized in parent with rate limiter)
-        self.candidate_generator = UnifiedCandidateGenerator(api_service)
+        # Phase 3: Pass session_manager to UnifiedCandidateGenerator for candidate pool persistence
+        self.candidate_generator = UnifiedCandidateGenerator(api_service, session_manager)
         self.quality_scorer = QualityScorer()
         
         # Base configuration - will be adapted based on intent
@@ -161,9 +164,50 @@ class DiscoveryAgent(BaseAgent):
         else:
             self.logger.warning(f"Unknown intent: {intent}, using default parameters")
     
+    def _adapt_to_effective_intent(self, effective_intent: Dict[str, Any]) -> None:
+        """
+        Adapt agent parameters based on effective intent from IntentOrchestrationService.
+        
+        Phase 2: Simplified parameter adaptation using effective intent.
+        """
+        intent_str = effective_intent.get('intent', 'discovery')
+        
+        # Use existing intent parameter mapping
+        self._adapt_to_intent(intent_str)
+        
+        # Additional Phase 2 adaptations based on effective intent metadata
+        if effective_intent.get('is_followup'):
+            followup_type = effective_intent.get('followup_type')
+            if followup_type == 'load_more':
+                # For load more requests, be more permissive with quality
+                self.quality_threshold = max(0.1, self.quality_threshold - 0.1)
+                self.logger.info("Phase 2: Relaxed quality threshold for load_more followup")
+            elif followup_type == 'artist_deep_dive':
+                # For artist deep dives, focus on target artist
+                self.underground_bias = 0.2  # Less underground bias for artist focus
+                self.novelty_threshold = 0.1  # More permissive novelty
+                self.logger.info("Phase 2: Adapted for artist_deep_dive followup")
+        
+        # Adjust candidate pool size based on effective intent confidence
+        confidence = effective_intent.get('confidence', 0.8)
+        if confidence < 0.6:
+            # Lower confidence - generate more candidates for better coverage
+            self.target_candidates = int(self.target_candidates * 1.3)
+            self.logger.info(f"Phase 2: Increased candidate pool to {self.target_candidates} due to low confidence ({confidence})")
+        
+        self.logger.info(
+            "Phase 2: Adapted to effective intent",
+            intent=intent_str,
+            is_followup=effective_intent.get('is_followup', False),
+            followup_type=effective_intent.get('followup_type'),
+            confidence=confidence
+        )
+    
     async def process(self, state: MusicRecommenderState) -> MusicRecommenderState:
         """
         Generate discovery recommendations using shared components.
+        
+        Phase 2: Simplified to use effective intent from IntentOrchestrationService.
         
         Args:
             state: Current workflow state
@@ -172,35 +216,67 @@ class DiscoveryAgent(BaseAgent):
             Updated state with discovery recommendations
         """
         try:
-            self.logger.info("Starting discovery agent processing")
+            self.logger.info("Starting discovery agent processing (Phase 2)")
             
-            # Extract entities and intent from planner
-            entities = state.entities or {}
-            intent_analysis = state.intent_analysis or {}
-            
-            # 🚀 CHECK FOR CONTEXT OVERRIDE FIRST
-            context_override_applied = False
-            target_artist_from_override = None
-            
-            if hasattr(state, 'context_override') and state.context_override:
-                context_override = state.context_override
+            # Phase 2: Use effective intent if available, otherwise fall back to traditional approach
+            if hasattr(state, 'effective_intent') and state.effective_intent:
+                self.logger.info("🎯 Phase 2: Using effective intent from IntentOrchestrationService")
+                effective_intent = state.effective_intent
                 
-                self.logger.info(f"🔧 DEBUG: Discovery Agent received context_override: {type(context_override)}")
-                self.logger.info(f"🔧 DEBUG: context_override data: {context_override}")
+                # Extract simplified parameters from effective intent
+                intent_str = effective_intent.get('intent', 'discovery')
+                entities = effective_intent.get('entities', {})
+                is_followup = effective_intent.get('is_followup', False)
                 
-                # Handle both dictionary and object formats
-                is_followup = False
-                target_entity = None
-                intent_override = None
+                # Adapt parameters based on effective intent
+                self._adapt_to_effective_intent(effective_intent)
                 
-                if isinstance(context_override, dict):
-                    is_followup = context_override.get('is_followup', False)
-                    target_entity = context_override.get('target_entity')
-                    intent_override = context_override.get('intent_override')
-                elif hasattr(context_override, 'is_followup'):
-                    is_followup = context_override.is_followup
-                    target_entity = getattr(context_override, 'target_entity', None)
-                    intent_override = getattr(context_override, 'intent_override', None)
+                # Use effective intent entities for processing
+                intent_analysis = {
+                    'intent': intent_str,
+                    'confidence': effective_intent.get('confidence', 0.8),
+                    'is_followup': is_followup,
+                    'followup_type': effective_intent.get('followup_type'),
+                    'preserves_original_context': effective_intent.get('preserves_original_context', False)
+                }
+                
+                # Extract target artist if this is a follow-up
+                target_artist_from_override = None
+                if is_followup and 'artists' in entities:
+                    artists = entities.get('artists', [])
+                    if artists:
+                        target_artist_from_override = artists[0] if isinstance(artists, list) else str(artists)
+                
+                context_override_applied = is_followup
+                context_override = effective_intent  # Use effective intent as context
+                
+            else:
+                # Fallback: Use traditional approach for backward compatibility
+                self.logger.info("🔧 Phase 2: No effective intent available, using traditional approach")
+                entities = state.entities or {}
+                intent_analysis = state.intent_analysis or {}
+                
+                # Traditional context override handling
+                context_override_applied = False
+                target_artist_from_override = None
+                context_override = None
+                
+                if hasattr(state, 'context_override') and state.context_override:
+                    context_override = state.context_override
+                    
+                    # Handle both dictionary and object formats
+                    is_followup = False
+                    target_entity = None
+                    intent_override = None
+                    
+                    if isinstance(context_override, dict):
+                        is_followup = context_override.get('is_followup', False)
+                        target_entity = context_override.get('target_entity')
+                        intent_override = context_override.get('intent_override')
+                    elif hasattr(context_override, 'is_followup'):
+                        is_followup = context_override.is_followup
+                        target_entity = getattr(context_override, 'target_entity', None)
+                        intent_override = getattr(context_override, 'intent_override', None)
                 
                 if is_followup and target_entity:
                     target_artist_from_override = target_entity
@@ -242,8 +318,10 @@ class DiscoveryAgent(BaseAgent):
                         self.logger.info(f"🔧 Unknown intent override: {intent_override}")
                 else:
                     self.logger.info(f"🔧 DEBUG: No followup detected - is_followup={is_followup}, target_entity={target_entity}")
-            else:
-                self.logger.info("🔧 DEBUG: No context_override found in state")
+                    
+                # No context override found
+                if not hasattr(state, 'context_override') or not state.context_override:
+                    self.logger.info("🔧 DEBUG: No context_override found in state")
             
             # 🔧 Get intent and adapt parameters accordingly
             query_understanding = state.query_understanding
@@ -350,6 +428,31 @@ class DiscoveryAgent(BaseAgent):
             )
             
             self.logger.debug(f"Generated {len(candidates)} discovery candidates")
+            
+            # Phase 3: Generate and persist large candidate pool if recommended by planner
+            planning_strategy = getattr(state, 'planning_strategy', {})
+            should_generate_large_pool = planning_strategy.get('generate_large_pool', False)
+            
+            if should_generate_large_pool and recently_shown_count == 0:  # Only for original queries
+                self.logger.info("🎯 Phase 3: Generating large candidate pool for follow-up efficiency")
+                try:
+                    pool_key = await self.candidate_generator.generate_and_persist_large_pool(
+                        entities=entities,
+                        intent_analysis=intent_analysis,
+                        session_id=state.session_id,
+                        agent_type="discovery",
+                        detected_intent=candidate_generation_intent
+                    )
+                    if pool_key:
+                        self.logger.info(f"🎯 Phase 3: Large pool generated and stored with key: {pool_key}")
+                    else:
+                        self.logger.info("🎯 Phase 3: Large pool generation skipped (not beneficial for this intent)")
+                except Exception as e:
+                    self.logger.warning(f"Phase 3: Large pool generation failed: {e}")
+            elif recently_shown_count > 0:
+                self.logger.info("🎯 Phase 3: Skipping large pool generation for follow-up query")
+            else:
+                self.logger.info("🎯 Phase 3: Large pool generation not recommended by planner")
             
             # Phase 2: Score candidates with discovery-specific metrics
             scored_candidates = await self._score_discovery_candidates(candidates, entities, intent_analysis)

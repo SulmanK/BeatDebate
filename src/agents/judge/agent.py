@@ -45,7 +45,8 @@ class JudgeAgent(BaseAgent):
         llm_client,
         api_service: APIService,
         metadata_service: MetadataService,
-        rate_limiter=None
+        rate_limiter=None,
+        session_manager=None
     ):
         """
         Initialize simplified judge agent with injected dependencies.
@@ -56,6 +57,7 @@ class JudgeAgent(BaseAgent):
             api_service: Unified API service
             metadata_service: Unified metadata service
             rate_limiter: Rate limiter for LLM API calls
+            session_manager: SessionManagerService for candidate pool retrieval (Phase 3)
         """
         super().__init__(
             config=config, 
@@ -67,6 +69,9 @@ class JudgeAgent(BaseAgent):
         
         # Shared components initialized in parent with rate limiter
         self.quality_scorer = QualityScorer()
+        
+        # Phase 3: Store session manager for candidate pool retrieval
+        self.session_manager = session_manager
         
         # Configuration
         self.final_recommendations = 25
@@ -85,6 +90,102 @@ class JudgeAgent(BaseAgent):
         
         self.logger.info("Simplified JudgeAgent initialized with dependency injection")
     
+    async def _get_candidates_from_persisted_pool(
+        self,
+        state: MusicRecommenderState,
+        max_candidates: int = 50
+    ) -> List[TrackRecommendation]:
+        """
+        Retrieve candidates from persisted candidate pool for follow-up queries.
+        
+        Phase 3: This method enables efficient "load more" functionality by
+        retrieving candidates from the stored pool instead of regenerating.
+        
+        Args:
+            state: Current workflow state
+            max_candidates: Maximum number of candidates to retrieve
+            
+        Returns:
+            List of TrackRecommendation from persisted pool
+        """
+        if not self.session_manager:
+            self.logger.warning("No session manager available for candidate pool retrieval")
+            return []
+        
+        # Check if this is a follow-up query that can use persisted pools
+        if not hasattr(state, 'effective_intent') or not state.effective_intent:
+            return []
+        
+        effective_intent = state.effective_intent
+        if not effective_intent.get('is_followup'):
+            return []
+        
+        followup_type = effective_intent.get('followup_type')
+        if followup_type != 'load_more':
+            return []
+        
+        # Get the intent and entities for pool retrieval
+        intent = effective_intent.get('intent')
+        entities = effective_intent.get('entities', {})
+        session_id = state.session_id
+        
+        self.logger.info(
+            "Attempting to retrieve candidates from persisted pool",
+            session_id=session_id,
+            intent=intent,
+            followup_type=followup_type
+        )
+        
+        try:
+            # Retrieve candidate pool
+            candidate_pool = await self.session_manager.get_candidate_pool(
+                session_id=session_id,
+                intent=intent,
+                entities=entities
+            )
+            
+            if not candidate_pool:
+                self.logger.info("No compatible candidate pool found")
+                return []
+            
+            # Convert UnifiedTrackMetadata to TrackRecommendation
+            track_recommendations = []
+            for i, track_metadata in enumerate(candidate_pool.candidates[:max_candidates]):
+                try:
+                    # Create TrackRecommendation from UnifiedTrackMetadata
+                    track_rec = TrackRecommendation(
+                        track_id=getattr(track_metadata, 'id', f"pool_{i}"),
+                        name=track_metadata.name,
+                        artist=track_metadata.artist,
+                        album=track_metadata.album,
+                        duration=track_metadata.duration,
+                        popularity=track_metadata.popularity,
+                        genres=track_metadata.genres,
+                        tags=track_metadata.tags,
+                        audio_features=track_metadata.audio_features,
+                        source="persisted_pool",
+                        confidence=track_metadata.confidence,
+                        reasoning="Retrieved from persisted candidate pool for efficient follow-up"
+                    )
+                    track_recommendations.append(track_rec)
+                except Exception as e:
+                    self.logger.warning(f"Failed to convert pool candidate {i}: {e}")
+                    continue
+            
+            self.logger.info(
+                "Successfully retrieved candidates from persisted pool",
+                session_id=session_id,
+                pool_size=len(candidate_pool.candidates),
+                retrieved_count=len(track_recommendations),
+                usage_count=candidate_pool.used_count
+            )
+            
+            return track_recommendations
+            
+        except Exception as e:
+            self.logger.error(f"Failed to retrieve candidates from persisted pool: {e}")
+            return []
+    
     async def process(self, state: MusicRecommenderState) -> MusicRecommenderState:
         """
         Evaluate and select final recommendations from all agent candidates.
@@ -98,8 +199,15 @@ class JudgeAgent(BaseAgent):
         try:
             self.logger.info("Starting judge agent processing")
             
-            # Collect all candidate recommendations
-            all_candidates = self._collect_all_candidates(state)
+            # Phase 3: Check if we can use persisted candidate pool for follow-up queries
+            pool_candidates = await self._get_candidates_from_persisted_pool(state)
+            
+            if pool_candidates:
+                self.logger.info(f"🎯 Phase 3: Using {len(pool_candidates)} candidates from persisted pool")
+                all_candidates = pool_candidates
+            else:
+                # Collect all candidate recommendations from agents
+                all_candidates = self._collect_all_candidates(state)
             
             self.logger.debug(f"Collected {len(all_candidates)} total candidates")
             

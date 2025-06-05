@@ -645,7 +645,8 @@ class EnhancedRecommendationService:
                 llm_client=gemini_client,
                 api_service=self.api_service,
                 metadata_service=metadata_service,
-                rate_limiter=gemini_rate_limiter
+                rate_limiter=gemini_rate_limiter,
+                session_manager=self.session_manager  # Phase 3: For candidate pool persistence
             )
             
             self.discovery_agent = DiscoveryAgent(
@@ -653,7 +654,8 @@ class EnhancedRecommendationService:
                 llm_client=gemini_client,
                 api_service=self.api_service,
                 metadata_service=metadata_service,
-                rate_limiter=gemini_rate_limiter
+                rate_limiter=gemini_rate_limiter,
+                session_manager=self.session_manager  # Phase 3: For candidate pool persistence
             )
             
             self.judge_agent = JudgeAgent(
@@ -661,7 +663,8 @@ class EnhancedRecommendationService:
                 llm_client=gemini_client,
                 api_service=self.api_service,
                 metadata_service=metadata_service,
-                rate_limiter=gemini_rate_limiter
+                rate_limiter=gemini_rate_limiter,
+                session_manager=self.session_manager  # Phase 3: For candidate pool retrieval
             )
             
             # Build workflow graph

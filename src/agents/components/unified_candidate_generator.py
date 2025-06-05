@@ -27,19 +27,26 @@ class UnifiedCandidateGenerator:
     - Configurable source distributions
     """
     
-    def __init__(self, api_service: APIService):
+    def __init__(self, api_service: APIService, session_manager=None):
         """
         Initialize unified candidate generator with API service.
         
         Args:
             api_service: Unified API service for music data access
+            session_manager: SessionManagerService for candidate pool persistence (Phase 3)
         """
         self.api_service = api_service
+        self.session_manager = session_manager  # Phase 3: For candidate pool persistence
         self.logger = logger.bind(component="UnifiedCandidateGenerator")
         
         # Default generation parameters - INCREASED for better coverage
         self.target_candidates = 100  # Increased from 60
         self.final_recommendations = 25  # Increased from 20
+        
+        # Phase 3: Candidate pool persistence settings
+        self.enable_pool_persistence = session_manager is not None
+        self.large_pool_multiplier = 3  # Generate 3x more candidates for persistence
+        self.pool_persistence_intents = ['by_artist', 'artist_similarity', 'genre_exploration']  # Intents that benefit from pools
         
         # Strategy configurations - REDUCED for performance
         self.strategy_configs = {
@@ -56,7 +63,113 @@ class UnifiedCandidateGenerator:
             }
         }
         
-        self.logger.info("Unified Candidate Generator initialized")
+        self.logger.info(
+            "Unified Candidate Generator initialized", 
+            pool_persistence_enabled=self.enable_pool_persistence
+        )
+    
+    async def generate_and_persist_large_pool(
+        self,
+        entities: Dict[str, Any],
+        intent_analysis: Dict[str, Any],
+        session_id: str,
+        agent_type: str = "discovery",
+        detected_intent: str = None
+    ) -> str:
+        """
+        Generate a large candidate pool and persist it for follow-up queries.
+        
+        Phase 3: This method generates 3x more candidates than usual and stores them
+        in SessionManagerService for efficient "load more" functionality.
+        
+        Args:
+            entities: Extracted entities from PlannerAgent
+            intent_analysis: Intent analysis from PlannerAgent  
+            session_id: Session ID for pool storage
+            agent_type: "genre_mood" or "discovery" for strategy selection
+            detected_intent: Specific intent for enhanced candidate generation
+            
+        Returns:
+            Pool key for retrieving the stored candidates
+        """
+        if not self.enable_pool_persistence:
+            self.logger.warning("Pool persistence not enabled, falling back to regular generation")
+            return None
+            
+        # Check if this intent benefits from pool persistence
+        if detected_intent not in self.pool_persistence_intents:
+            self.logger.info(f"Intent '{detected_intent}' doesn't benefit from pool persistence")
+            return None
+            
+        # Generate large candidate pool (3x normal size)
+        original_target = self.target_candidates
+        self.target_candidates = original_target * self.large_pool_multiplier
+        
+        self.logger.info(
+            "Generating large candidate pool for persistence",
+            session_id=session_id,
+            intent=detected_intent,
+            target_candidates=self.target_candidates,
+            multiplier=self.large_pool_multiplier
+        )
+        
+        try:
+            # Generate the large pool
+            large_pool = await self.generate_candidate_pool(
+                entities=entities,
+                intent_analysis=intent_analysis,
+                agent_type=agent_type,
+                detected_intent=detected_intent,
+                recently_shown_track_ids=[]  # No exclusions for initial pool
+            )
+            
+            # Convert to UnifiedTrackMetadata for storage
+            metadata_pool = []
+            for candidate in large_pool:
+                try:
+                    # Convert dict back to UnifiedTrackMetadata
+                    metadata = UnifiedTrackMetadata(
+                        name=candidate.get('name', 'Unknown'),
+                        artist=candidate.get('artist', 'Unknown'),
+                        album=candidate.get('album', 'Unknown'),
+                        duration=candidate.get('duration', 0),
+                        popularity=candidate.get('popularity', 0.0),
+                        genres=candidate.get('genres', []),
+                        tags=candidate.get('tags', []),
+                        audio_features=candidate.get('audio_features', {}),
+                        source=candidate.get('source', 'unified_generator'),
+                        confidence=candidate.get('source_confidence', 0.5)
+                    )
+                    metadata_pool.append(metadata)
+                except Exception as e:
+                    self.logger.warning(f"Failed to convert candidate to metadata: {e}")
+                    continue
+            
+            # Store the pool in SessionManagerService
+            pool_key = await self.session_manager.store_candidate_pool(
+                session_id=session_id,
+                candidates=metadata_pool,
+                intent=detected_intent,
+                entities=entities
+            )
+            
+            self.logger.info(
+                "Large candidate pool stored successfully",
+                session_id=session_id,
+                pool_key=pool_key,
+                pool_size=len(metadata_pool),
+                intent=detected_intent
+            )
+            
+            return pool_key
+            
+        except Exception as e:
+            self.logger.error(f"Failed to generate/store large candidate pool: {e}")
+            return None
+            
+        finally:
+            # Restore original target
+            self.target_candidates = original_target
     
     async def generate_candidate_pool(
         self, 

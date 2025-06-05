@@ -46,7 +46,8 @@ class GenreMoodAgent(BaseAgent):
         llm_client,
         api_service: APIService,
         metadata_service: MetadataService,
-        rate_limiter=None
+        rate_limiter=None,
+        session_manager=None
     ):
         """
         Initialize simplified genre mood agent with injected dependencies.
@@ -57,6 +58,7 @@ class GenreMoodAgent(BaseAgent):
             api_service: Unified API service
             metadata_service: Unified metadata service
             rate_limiter: Rate limiter for LLM API calls
+            session_manager: SessionManagerService for candidate pool persistence (Phase 3)
         """
         super().__init__(
             config=config, 
@@ -67,7 +69,8 @@ class GenreMoodAgent(BaseAgent):
         )
         
         # Shared components (LLMUtils now initialized in parent with rate limiter)
-        self.candidate_generator = UnifiedCandidateGenerator(api_service)
+        # Phase 3: Pass session_manager to UnifiedCandidateGenerator for candidate pool persistence
+        self.candidate_generator = UnifiedCandidateGenerator(api_service, session_manager)
         self.quality_scorer = QualityScorer()
         
         # Base configuration - will be adapted based on intent

@@ -30,6 +30,19 @@ from .conversation_context_service import (
     ConversationContextManager
 )
 
+# Phase 1 Enhanced Services
+from .session_manager_service import (
+    SessionManagerService,
+    OriginalQueryContext,
+    CandidatePool,
+    ContextState
+)
+
+from .intent_orchestration_service import (
+    IntentOrchestrationService,
+    FollowUpType
+)
+
 # Existing services (maintained for backward compatibility)
 from .smart_context_manager import SmartContextManager
 from .cache_manager import CacheManager, get_cache_manager
@@ -52,6 +65,14 @@ __all__ = [
     "get_metadata_service",
     "close_metadata_service",
     "ConversationContextManager",
+    
+    # Phase 1 Enhanced Services
+    "SessionManagerService",
+    "OriginalQueryContext", 
+    "CandidatePool",
+    "ContextState",
+    "IntentOrchestrationService",
+    "FollowUpType",
     
     # Existing services
     "SmartContextManager",

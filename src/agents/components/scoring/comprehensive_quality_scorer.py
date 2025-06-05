@@ -71,8 +71,8 @@ class ComprehensiveQualityScorer:
             )
             
             popularity_score = self.popularity_balancer.calculate_popularity_score(
-                listeners=int(track_data.get('listeners', 0)),
-                playcount=int(track_data.get('playcount', 0)),
+                listeners=int(track_data.get('listeners') or 0),
+                playcount=int(track_data.get('playcount') or 0),
                 exploration_openness=intent_analysis.get('exploration_openness', 0.5),
                 entities=entities,
                 intent_analysis=intent_analysis
@@ -335,8 +335,8 @@ class ComprehensiveQualityScorer:
             )
             
             popularity_score = self.popularity_balancer.calculate_popularity_score(
-                listeners=int(track_data.get('listeners', 0)),
-                playcount=int(track_data.get('playcount', 0)),
+                listeners=int(track_data.get('listeners') or 0),
+                playcount=int(track_data.get('playcount') or 0),
                 exploration_openness=intent_analysis.get('exploration_openness', 0.5),
                 entities=entities,
                 intent_analysis=intent_analysis

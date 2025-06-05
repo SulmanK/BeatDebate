@@ -23,6 +23,8 @@ try:
     from ..agents import PlannerAgent, GenreMoodAgent, DiscoveryAgent, JudgeAgent
     from .api_service import APIService, get_api_service
     from .smart_context_manager import SmartContextManager
+    from .session_manager_service import SessionManagerService
+    from .intent_orchestration_service import IntentOrchestrationService
     from .cache_manager import CacheManager, get_cache_manager
 except ImportError:
     # Fallback imports for testing
@@ -34,6 +36,8 @@ except ImportError:
     from agents import PlannerAgent, GenreMoodAgent, DiscoveryAgent, JudgeAgent
     from services.api_service import APIService, get_api_service
     from services.smart_context_manager import SmartContextManager
+    from services.session_manager_service import SessionManagerService
+    from services.intent_orchestration_service import IntentOrchestrationService
     from services.cache_manager import CacheManager, get_cache_manager
 
 logger = structlog.get_logger(__name__)
@@ -545,7 +549,9 @@ class EnhancedRecommendationService:
         system_config: Optional[SystemConfig] = None,
         api_service: Optional[APIService] = None,
         cache_manager: Optional[CacheManager] = None,
-        context_manager: Optional[SmartContextManager] = None
+        context_manager: Optional[SmartContextManager] = None,
+        session_manager: Optional[SessionManagerService] = None,
+        intent_orchestrator: Optional[IntentOrchestrationService] = None
     ):
         """
         Initialize enhanced recommendation service.
@@ -565,6 +571,11 @@ class EnhancedRecommendationService:
             cache_manager=self.cache_manager
         )
         self.context_manager = context_manager or SmartContextManager()
+        
+        # Phase 1 Enhanced Services
+        self.session_manager = session_manager or SessionManagerService(cache_manager=self.cache_manager)
+        # Intent orchestrator will be initialized after agents are created (needs LLM utils)
+        self._intent_orchestrator = intent_orchestrator
         
         # Initialize agents (will be created with shared API service)
         self._agents_initialized = False
@@ -658,6 +669,15 @@ class EnhancedRecommendationService:
             
             # Initialize context-aware intent analyzer
             self.context_analyzer = ContextAwareIntentAnalyzer(gemini_client, gemini_rate_limiter)
+            
+            # Initialize intent orchestrator if not provided
+            if not self._intent_orchestrator:
+                from ..agents.components.llm_utils import LLMUtils
+                llm_utils = LLMUtils(gemini_client, gemini_rate_limiter)
+                self._intent_orchestrator = IntentOrchestrationService(
+                    session_manager=self.session_manager,
+                    llm_utils=llm_utils
+                )
             
             self._agents_initialized = True
             self.logger.info("Agents initialized with shared API service and rate limiting")
@@ -1677,6 +1697,18 @@ class EnhancedRecommendationService:
             SmartContextManager instance
         """
         return self.context_manager
+    
+    @property
+    def intent_orchestrator(self) -> IntentOrchestrationService:
+        """
+        Get the IntentOrchestrationService instance.
+        
+        Returns:
+            IntentOrchestrationService instance
+        """
+        if not self._intent_orchestrator:
+            raise RuntimeError("Intent orchestrator not initialized. Call initialize_agents() first.")
+        return self._intent_orchestrator
     
     async def close(self):
         """Close all service connections."""

@@ -31,7 +31,7 @@ class SimilarityExplorer:
         """
         self.api_service = api_service
         self.max_hops = 3
-        self.max_artists_per_hop = 10
+        self.max_artists_per_hop = 20  # Increased from 10 to 20 for larger pools
         self.similarity_cache = {}
         
         logger.debug("SimilarityExplorer initialized")
@@ -40,7 +40,8 @@ class SimilarityExplorer:
         self,
         seed_artists: List[str],
         target_tracks: int = 50,
-        exploration_depth: int = 2
+        exploration_depth: int = 3,
+        exclude_seed_artists: bool = True
     ) -> List[Dict[str, Any]]:
         """
         Explore multi-hop artist similarity to find related tracks.
@@ -49,6 +50,7 @@ class SimilarityExplorer:
             seed_artists: Starting artists for exploration
             target_tracks: Target number of tracks to find
             exploration_depth: Number of hops to explore
+            exclude_seed_artists: If True, exclude tracks from seed artists (for artist_similarity)
             
         Returns:
             List of discovered tracks with similarity metadata
@@ -70,9 +72,17 @@ class SimilarityExplorer:
                 similar_artists = await self._get_similar_artists(artist)
                 next_hop_artists.update(similar_artists[:self.max_artists_per_hop])
                 
-                # Get tracks from this artist
-                artist_tracks = await self._get_artist_tracks(artist, hop)
-                discovered_tracks.extend(artist_tracks)
+                # Get tracks from this artist (exclude seed artists if requested)
+                should_get_tracks = True
+                if exclude_seed_artists:
+                    # Skip getting tracks from seed artists on ALL hops for artist_similarity
+                    should_get_tracks = artist not in seed_artists
+                    if not should_get_tracks:
+                        logger.debug(f"Excluding seed artist tracks: {artist} (hop {hop + 1})")
+                
+                if should_get_tracks:
+                    artist_tracks = await self._get_artist_tracks(artist, hop)
+                    discovered_tracks.extend(artist_tracks)
                 
                 explored_artists.add(artist)
                 
@@ -101,7 +111,17 @@ class SimilarityExplorer:
         try:
             # Use API service to get similar artists
             similar_data = await self.api_service.get_similar_artists(artist)
-            similar_artists = [item.get('name', '') for item in similar_data.get('artist', [])]
+            
+            # FIXED: API service returns a list of ArtistMetadata objects, not a dict
+            similar_artists = []
+            if isinstance(similar_data, list):
+                for artist_metadata in similar_data:
+                    if hasattr(artist_metadata, 'name'):
+                        similar_artists.append(artist_metadata.name)
+                    elif isinstance(artist_metadata, dict):
+                        similar_artists.append(artist_metadata.get('name', ''))
+                    else:
+                        similar_artists.append(str(artist_metadata))
             
             # Cache results
             self.similarity_cache[artist] = similar_artists
@@ -118,19 +138,21 @@ class SimilarityExplorer:
             tracks_data = await self.api_service.get_artist_top_tracks(artist)
             tracks = []
             
-            for track_data in tracks_data.get('track', [])[:10]:  # Limit per artist
-                track = {
-                    'name': track_data.get('name', ''),
-                    'artist': artist,
-                    'url': track_data.get('url', ''),
-                    'listeners': int(track_data.get('listeners', 0)),
-                    'playcount': int(track_data.get('playcount', 0)),
-                    'source': 'multi_hop_similarity',
-                    'source_artist': artist,
-                    'similarity_hop': hop,
-                    'tags': []  # Will be populated later if needed
-                }
-                tracks.append(track)
+            # FIXED: API service returns a list of UnifiedTrackMetadata objects, not a dict
+            if isinstance(tracks_data, list):
+                for track_metadata in tracks_data[:15]:  # Increased from 10 to 15 tracks per artist
+                    track = {
+                        'name': getattr(track_metadata, 'name', ''),
+                        'artist': artist,
+                        'url': getattr(track_metadata, 'url', ''),
+                        'listeners': getattr(track_metadata, 'listeners', 0),
+                        'playcount': getattr(track_metadata, 'playcount', 0),
+                        'source': 'multi_hop_similarity',
+                        'source_artist': artist,
+                        'similarity_hop': hop,
+                        'tags': getattr(track_metadata, 'tags', [])
+                    }
+                    tracks.append(track)
             
             return tracks
             

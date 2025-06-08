@@ -75,25 +75,30 @@ CRITICAL: Classify queries into these specific intent types based on the design 
    - User wants OTHER artists that are similar, NOT the target artist's own tracks
    - Extract artist names EXACTLY as written (e.g., "Mk.gee", "BROCKHAMPTON", "!!!")
 
-4. DISCOVERY ("Find me underground indie rock", "Something new and different")
+4. ARTIST_GENRE ("Songs by [Artist] that are [Genre]", "[Artist] tracks that are [Genre]")
+   - Focus on finding tracks BY the specified artist that match a specific genre
+   - User wants the artist's own tracks BUT filtered by genre/style
+   - Keywords: "by [Artist] that are", "[Artist] songs that are", "[Artist] music that is"
+
+5. DISCOVERY ("Find me underground indie rock", "Something new and different")
    - Focus on discovering truly new/unknown music
    - Emphasis on novelty and underground tracks (NO specific artist mentioned)
 
-5. GENRE_MOOD ("Upbeat electronic music", "Sad indie songs")
+6. GENRE_MOOD ("Upbeat electronic music", "Sad indie songs")
    - Focus on specific vibes, genres, or moods
    - No specific artist reference, just style/feel
 
-6. CONTEXTUAL ("Music for studying", "Workout playlist", "Road trip songs")
+7. CONTEXTUAL ("Music for studying", "Workout playlist", "Road trip songs")
    - Focus on functional music for specific activities
    - Context-driven recommendations
 
-7. HYBRID ("Chill songs like Bon Iver", "Upbeat music similar to Daft Punk")
+8. HYBRID ("Chill songs like Bon Iver", "Upbeat music similar to Daft Punk")
    - Combines artist similarity with mood/genre requirements
    - Both artist reference AND style/context requirements
 
 Return a JSON object with this exact structure:
 {
-    "intent": "by_artist|by_artist_underground|artist_similarity|discovery|genre_mood|contextual|hybrid",
+                "intent": "by_artist|by_artist_underground|artist_similarity|artist_genre|discovery|genre_mood|contextual|hybrid_similarity_genre",
     "musical_entities": {
         "artists": ["artist1", "artist2"],
         "genres": ["genre1", "genre2"], 
@@ -114,9 +119,10 @@ EXAMPLES:
 - "Hidden gems by The Beatles" → intent: "by_artist_underground", artists: ["The Beatles"], context_factors: ["underground"]
 - "Music like Mk.gee" → intent: "artist_similarity", artists: ["Mk.gee"]
 - "Artists similar to Radiohead" → intent: "artist_similarity", artists: ["Radiohead"]
+- "Songs by Michael Jackson that are R&B" → intent: "artist_genre", artists: ["Michael Jackson"], genres: ["R&B"]
 - "Find underground electronic music" → intent: "discovery", genres: ["electronic"], context_factors: ["underground"]
 - "Happy music for working out" → intent: "contextual", moods: ["happy"], context_factors: ["workout"]
-- "Chill songs like Bon Iver" → intent: "hybrid", artists: ["Bon Iver"], moods: ["chill"]
+- "Chill songs like Bon Iver" → intent: "hybrid_similarity_genre", artists: ["Bon Iver"], moods: ["chill"]
 - "Upbeat electronic music" → intent: "genre_mood", genres: ["electronic"], moods: ["upbeat"]
 
 Be specific about genres and extract moods from emotional language."""
@@ -206,7 +212,7 @@ Be specific about genres and extract moods from emotional language."""
         }
         
         # 🔧 SET FLAG: Track if pattern analysis detected hybrid intent
-        self._pattern_detected_hybrid = (comprehensive_analysis['intent_analysis']['primary_intent'] == 'hybrid')
+        self._pattern_detected_hybrid = (comprehensive_analysis['intent_analysis']['primary_intent'] == 'hybrid_similarity_genre')
         if self._pattern_detected_hybrid:
             self.logger.info(f"🔧 FLAG SET: Pattern analysis detected hybrid intent for query: '{query}'")
         
@@ -353,8 +359,10 @@ Remember to return ONLY the JSON object with no additional text."""
                     'by_artist': 'by_artist',
                     'by_artist_underground': 'by_artist_underground',
                     'discovery': 'discovery',
+                    'discovering_serendipity': 'discovering_serendipity',
                     'similarity': 'artist_similarity',
                     'artist_similarity': 'artist_similarity',
+                    'artist_genre': 'artist_genre',  # ✅ NEW: Add artist_genre mapping
                     'mood_based': 'genre_mood',
                     'activity_based': 'contextual',
                     'genre_specific': 'genre_mood',
@@ -364,8 +372,8 @@ Remember to return ONLY the JSON object with no additional text."""
                 
                 # 🔧 FIX: Override LLM intent if pattern analysis detected hybrid
                 if hasattr(self, '_pattern_detected_hybrid') and self._pattern_detected_hybrid:
-                    self.logger.info(f"🔧 OVERRIDE: Pattern analysis detected hybrid, overriding LLM intent '{intent_str}' -> 'hybrid'")
-                    intent_str = 'hybrid'
+                                    self.logger.info(f"🔧 OVERRIDE: Pattern analysis detected hybrid, overriding LLM intent '{intent_str}' -> 'hybrid_similarity_genre'")
+                intent_str = 'hybrid_similarity_genre'
                 
                 mapped_intent = intent_mapping.get(intent_str.lower(), 'discovery')  # 🔧 FIX: Fallback to 'discovery' not 'DISCOVERY'
                 self.logger.debug(f"🔧 INTENT MAPPING: '{intent_str}' -> '{mapped_intent}'")
@@ -449,7 +457,7 @@ Remember to return ONLY the JSON object with no additional text."""
             if (artists and 
                 any(phrase in original_query.lower() for phrase in ['like', 'similar to', 'sounds like', 'reminds me of']) and
                 not has_genre_mood_constraints and  # 🎯 NEW: Don't override hybrid queries with constraints
-                intent != QueryIntent.HYBRID):  # 🎯 NEW: Don't override correctly detected hybrid intent
+                intent != QueryIntent.HYBRID_SIMILARITY_GENRE):  # 🎯 NEW: Don't override correctly detected hybrid intent
                 
                 intent = QueryIntent.ARTIST_SIMILARITY
                 # Set default similarity type for artist similarity if not already set
@@ -460,13 +468,13 @@ Remember to return ONLY the JSON object with no additional text."""
                   any(phrase in original_query.lower() for phrase in ['like', 'similar to', 'sounds like', 'reminds me of'])):
                 # Keep as hybrid for queries like "Music like X but Y"
                 self.logger.info(f"🎯 HYBRID query detected: artist similarity + constraints (genres: {genres_found}, moods: {musical_entities.get('moods', [])})")
-                if intent != QueryIntent.HYBRID:
-                    intent = QueryIntent.HYBRID
-                    self.logger.info("🔧 Converted to HYBRID intent due to genre/mood constraints")
+                if intent != QueryIntent.HYBRID_SIMILARITY_GENRE:
+                    intent = QueryIntent.HYBRID_SIMILARITY_GENRE
+                    self.logger.info("🔧 Converted to HYBRID_SIMILARITY_GENRE intent due to genre/mood constraints")
             
             # 🔧 NEW: Detect hybrid sub-types for better scoring
             hybrid_subtype = None
-            if intent == QueryIntent.HYBRID:
+            if intent == QueryIntent.HYBRID_SIMILARITY_GENRE:
                 hybrid_subtype = self.query_utils.detect_hybrid_subtype(
                     original_query, 
                     analysis.get('musical_entities', {})

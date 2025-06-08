@@ -36,15 +36,18 @@ class IntentAwareScorer:
         self, 
         track_data: Dict, 
         intent: str,
-        entities: Dict[str, Any] = None
+        entities: Dict[str, Any] = None,
+        all_candidates: List[Dict[str, Any]] = None
     ) -> float:
         """
         🔧 FIXED: Calculate proper novelty score based on popularity data.
+        🎯 NEW: Relative scoring for by_artist_underground intent
         
         Args:
             track_data: Track metadata including play counts
             intent: Intent type (discovery, hybrid_discovery_primary, etc.)
             entities: Musical entities for context
+            all_candidates: All candidates for relative scoring (needed for by_artist_underground)
             
         Returns:
             Novelty score (0.0 - 1.0) where 1.0 = truly underground
@@ -53,8 +56,13 @@ class IntentAwareScorer:
             playcount = int(track_data.get('playcount') or 0)
             listeners = int(track_data.get('listeners') or 0)
             
+            # 🎯 NEW: For by_artist_underground, calculate relative stats
+            artist_stats = None
+            if 'by_artist_underground' in intent and all_candidates:
+                artist_stats = self._calculate_artist_stats(track_data.get('artist', ''), all_candidates)
+            
             # Calculate popularity-based novelty (INVERSE of popularity)
-            novelty_score = self._calculate_underground_novelty(playcount, listeners, intent)
+            novelty_score = self._calculate_underground_novelty(playcount, listeners, intent, artist_stats)
             
             # Apply intent-specific thresholds and bonuses
             if 'discovery' in intent or intent == 'discovery':
@@ -71,7 +79,8 @@ class IntentAwareScorer:
                 playcount=playcount,
                 listeners=listeners,
                 intent=intent,
-                novelty_score=novelty_score
+                novelty_score=novelty_score,
+                used_relative_scoring=artist_stats is not None
             )
             
             return min(1.0, max(0.0, novelty_score))
@@ -80,21 +89,30 @@ class IntentAwareScorer:
             self.logger.warning("Novelty scoring failed", error=str(e))
             return 0.5
     
-    def _calculate_underground_novelty(self, playcount: int, listeners: int, intent: str) -> float:
+    def _calculate_underground_novelty(self, playcount: int, listeners: int, intent: str, artist_stats: Dict[str, Any] = None) -> float:
         """
         Calculate novelty score based on popularity metrics.
         
         🔧 FIXED: Higher popularity = LOWER novelty score
+        🎯 NEW: Relative scoring for by_artist_underground intent
         """
         # Handle zero values
         if playcount == 0 and listeners == 0:
             return 1.0  # Completely unknown = maximum novelty
         
-        # Intent-specific popularity thresholds
+        # 🎯 NEW: For by_artist_underground, use RELATIVE scoring within artist's discography
+        if 'by_artist_underground' in intent and artist_stats:
+            return self._calculate_relative_underground_novelty(playcount, listeners, artist_stats)
+        
+        # Intent-specific popularity thresholds (for other intents)
         if 'discovery' in intent or intent == 'discovery':
             # Discovery: Strict but realistic thresholds for truly underground focus
             max_listeners = 500000   # 500k listeners = underground limit (was 50k - too strict!)
             max_playcount = 5000000  # 5M plays = underground limit (was 500k - too strict!)
+        elif 'by_artist_underground' in intent:
+            # Underground by artist: Very strict thresholds for truly underground tracks (fallback if no artist_stats)
+            max_listeners = 50000    # 50k listeners = underground limit for artist tracks
+            max_playcount = 500000   # 500k plays = underground limit for artist tracks  
         elif 'similarity' in intent or intent == 'artist_similarity':
             # Similarity: Relaxed thresholds (allow moderate popularity)
             max_listeners = 1000000   # 1M listeners = acceptable
@@ -113,12 +131,121 @@ class IntentAwareScorer:
         if playcount > 0:
             playcount_novelty = 1.0 - min(1.0, playcount / max_playcount)
         else:
-            playcount_novelty = 1.0
+            # For by_artist_underground, missing playcount should use listener data
+            if 'by_artist_underground' in intent and listeners > 0:
+                playcount_novelty = listener_novelty  # Use listener novelty if playcount missing
+            else:
+                playcount_novelty = 1.0
         
         # Combine listener and playcount novelty
         combined_novelty = (listener_novelty + playcount_novelty) / 2
         
         return combined_novelty
+    
+    def _calculate_relative_underground_novelty(self, playcount: int, listeners: int, artist_stats: Dict[str, Any]) -> float:
+        """
+        Calculate relative underground novelty within an artist's discography.
+        
+        Args:
+            playcount: Track's playcount
+            listeners: Track's listener count  
+            artist_stats: Dict with 'max_listeners', 'min_listeners', 'max_playcount', 'min_playcount'
+        
+        Returns:
+            Relative novelty score (0.0 = most popular track, 1.0 = least popular track)
+        """
+        try:
+            # Extract artist discography stats
+            max_listeners = artist_stats.get('max_listeners', listeners)
+            min_listeners = artist_stats.get('min_listeners', listeners)
+            max_playcount = artist_stats.get('max_playcount', playcount)
+            min_playcount = artist_stats.get('min_playcount', playcount)
+            
+            # Calculate relative position within artist's range
+            listener_novelty = 1.0
+            if max_listeners > min_listeners and listeners > 0:
+                # Position within artist's listener range (inverted - lower listeners = higher novelty)
+                listener_position = (listeners - min_listeners) / (max_listeners - min_listeners)
+                listener_novelty = 1.0 - listener_position
+            
+            playcount_novelty = 1.0
+            if max_playcount > min_playcount and playcount > 0:
+                # Position within artist's playcount range (inverted - lower playcount = higher novelty)
+                playcount_position = (playcount - min_playcount) / (max_playcount - min_playcount)
+                playcount_novelty = 1.0 - playcount_position
+            elif playcount == 0 and listeners > 0:
+                # Use listener novelty if playcount is missing
+                playcount_novelty = listener_novelty
+            
+            # Combine relative scores
+            relative_novelty = (listener_novelty + playcount_novelty) / 2
+            
+            self.logger.debug(
+                f"🎯 RELATIVE UNDERGROUND SCORING: listeners={listeners} ({min_listeners}-{max_listeners}), "
+                f"playcount={playcount} ({min_playcount}-{max_playcount}), relative_novelty={relative_novelty:.3f}"
+            )
+            
+            return relative_novelty
+            
+        except Exception as e:
+            self.logger.warning(f"Relative underground calculation failed: {e}")
+            # Fallback to absolute scoring
+            return self._calculate_underground_novelty(playcount, listeners, 'by_artist_underground', None)
+    
+    def _calculate_artist_stats(self, target_artist: str, all_candidates: List[Dict[str, Any]]) -> Dict[str, Any]:
+        """
+        Calculate artist discography statistics for relative underground scoring.
+        
+        Args:
+            target_artist: Artist name to calculate stats for
+            all_candidates: All candidates in the current batch
+            
+        Returns:
+            Dict with min/max listener and playcount stats for the artist
+        """
+        try:
+            # Filter candidates for target artist (normalize names for comparison)
+            artist_tracks = []
+            target_artist_normalized = target_artist.lower().strip()
+            
+            for candidate in all_candidates:
+                candidate_artist = candidate.get('artist', '').lower().strip()
+                if candidate_artist == target_artist_normalized:
+                    listeners = int(candidate.get('listeners') or 0)
+                    playcount = int(candidate.get('playcount') or 0)
+                    if listeners > 0 or playcount > 0:  # Only include tracks with data
+                        artist_tracks.append({
+                            'listeners': listeners,
+                            'playcount': playcount
+                        })
+            
+            if not artist_tracks:
+                self.logger.warning(f"No tracks found for artist stats: {target_artist}")
+                return {}
+            
+            # Calculate min/max stats
+            all_listeners = [track['listeners'] for track in artist_tracks if track['listeners'] > 0]
+            all_playcounts = [track['playcount'] for track in artist_tracks if track['playcount'] > 0]
+            
+            stats = {}
+            if all_listeners:
+                stats['max_listeners'] = max(all_listeners)
+                stats['min_listeners'] = min(all_listeners)
+            if all_playcounts:
+                stats['max_playcount'] = max(all_playcounts)
+                stats['min_playcount'] = min(all_playcounts)
+            
+            self.logger.debug(
+                f"🎯 ARTIST STATS for {target_artist}: {len(artist_tracks)} tracks, "
+                f"listeners: {stats.get('min_listeners', 0)}-{stats.get('max_listeners', 0)}, "
+                f"playcount: {stats.get('min_playcount', 0)}-{stats.get('max_playcount', 0)}"
+            )
+            
+            return stats
+            
+        except Exception as e:
+            self.logger.warning(f"Artist stats calculation failed for {target_artist}: {e}")
+            return {}
     
     def _apply_discovery_novelty_boost(
         self, 
@@ -248,13 +375,64 @@ class IntentAwareScorer:
         """Extract target artists from entities."""
         target_artists = []
         
-        musical_entities = entities.get('musical_entities', {})
-        artists = musical_entities.get('artists', {})
+        # DEBUG: Log the entities structure
+        self.logger.debug(f"🔍 SIMILARITY SCORER DEBUG: Full entities structure: {entities}")
         
-        # Get primary and similar_to artists
-        target_artists.extend(artists.get('primary', []))
-        target_artists.extend(artists.get('similar_to', []))
+        # FIXED: Handle BOTH entity formats (flat and nested)
         
+        # 1. Try flat format first (from context handlers): {'artists': ['Mk.gee'], ...}
+        if 'artists' in entities and isinstance(entities['artists'], list):
+            self.logger.debug(f"🔍 SIMILARITY SCORER DEBUG: Found flat format artists: {entities['artists']}")
+            for artist_obj in entities['artists']:
+                if isinstance(artist_obj, dict) and 'name' in artist_obj:
+                    target_artists.append(artist_obj['name'])
+                    self.logger.debug(f"🔍 SIMILARITY SCORER DEBUG: Extracted artist from dict: {artist_obj['name']}")
+                elif isinstance(artist_obj, str):
+                    target_artists.append(artist_obj)
+                    self.logger.debug(f"🔍 SIMILARITY SCORER DEBUG: Extracted artist from string: {artist_obj}")
+        
+        # 2. Try nested format (from planners): {'musical_entities': {'artists': {'primary': [...]}}}
+        elif 'musical_entities' in entities and 'artists' in entities['musical_entities']:
+            musical_artists = entities['musical_entities']['artists']
+            
+            # Extract from musical_entities.artists.primary
+            if 'primary' in musical_artists:
+                self.logger.debug(f"🔍 SIMILARITY SCORER DEBUG: Found musical_entities.artists.primary: {musical_artists['primary']}")
+                for artist_obj in musical_artists['primary']:
+                    if isinstance(artist_obj, dict) and 'name' in artist_obj:
+                        target_artists.append(artist_obj['name'])
+                        self.logger.debug(f"🔍 SIMILARITY SCORER DEBUG: Extracted artist from dict: {artist_obj['name']}")
+                    elif isinstance(artist_obj, str):
+                        target_artists.append(artist_obj)
+                        self.logger.debug(f"🔍 SIMILARITY SCORER DEBUG: Extracted artist from string: {artist_obj}")
+            
+            # Extract from musical_entities.artists.similar_to
+            if 'similar_to' in musical_artists:
+                for artist_obj in musical_artists['similar_to']:
+                    if isinstance(artist_obj, dict) and 'name' in artist_obj:
+                        target_artists.append(artist_obj['name'])
+                    elif isinstance(artist_obj, str):
+                        target_artists.append(artist_obj)
+        
+        # 3. Fallback: Try legacy format (artists.primary) for backward compatibility
+        elif 'artists' in entities and isinstance(entities['artists'], dict) and 'primary' in entities['artists']:
+            self.logger.debug(f"🔍 SIMILARITY SCORER DEBUG: Found legacy artists.primary: {entities['artists']['primary']}")
+            for artist_obj in entities['artists']['primary']:
+                if isinstance(artist_obj, dict) and 'name' in artist_obj:
+                    target_artists.append(artist_obj['name'])
+                    self.logger.debug(f"🔍 SIMILARITY SCORER DEBUG: Extracted artist from dict: {artist_obj['name']}")
+                elif isinstance(artist_obj, str):
+                    target_artists.append(artist_obj)
+                    self.logger.debug(f"🔍 SIMILARITY SCORER DEBUG: Extracted artist from string: {artist_obj}")
+        
+        else:
+            self.logger.debug(f"🔍 SIMILARITY SCORER DEBUG: No artists found - keys: {entities.keys()}")
+            if 'musical_entities' in entities:
+                self.logger.debug(f"🔍 SIMILARITY SCORER DEBUG: Musical entities keys: {entities['musical_entities'].keys()}")
+                if 'artists' in entities['musical_entities']:
+                    self.logger.debug(f"🔍 SIMILARITY SCORER DEBUG: Musical artists keys: {entities['musical_entities']['artists'].keys()}")
+        
+        self.logger.debug(f"🔍 SIMILARITY SCORER DEBUG: Final extracted artists: {target_artists}")
         return list(set(target_artists))  # Remove duplicates
     
     def _calculate_style_similarity(

@@ -493,7 +493,7 @@ class LLMUtils:
         examples: Optional[list] = None
     ) -> str:
         """
-        Create a structured prompt for consistent LLM interactions.
+        Create a structured prompt for LLM with consistent formatting.
         
         Args:
             task_description: Description of the task
@@ -511,23 +511,61 @@ class LLMUtils:
             json.dumps(input_data, indent=2),
             "",
             "Required Output Format:",
-            json.dumps(output_format, indent=2),
-            ""
+            json.dumps(output_format, indent=2)
         ]
         
         if examples:
             prompt_parts.extend([
+                "",
                 "Examples:",
-                *[json.dumps(example, indent=2) for example in examples],
-                ""
+                json.dumps(examples, indent=2)
             ])
         
         prompt_parts.extend([
-            "Instructions:",
-            "- Return ONLY the JSON object with no additional text",
-            "- Ensure all required fields are included",
-            "- Use the exact format specified above",
-            ""
+            "",
+            "Please provide your response in the exact JSON format specified above.",
+            "Ensure all required fields are included and properly formatted."
         ])
         
-        return "\n".join(prompt_parts) 
+        return "\n".join(prompt_parts)
+
+    async def generate_reasoning(
+        self,
+        reasoning_prompt: str,
+        max_tokens: int = 100,
+        temperature: float = 0.7
+    ) -> str:
+        """
+        Generate reasoning text using LLM.
+        
+        Args:
+            reasoning_prompt: Prompt for reasoning generation
+            max_tokens: Maximum tokens to generate
+            temperature: Temperature for generation
+            
+        Returns:
+            Generated reasoning text
+            
+        Raises:
+            RuntimeError: If LLM call fails
+        """
+        try:
+            response_text = await self.call_llm(reasoning_prompt)
+            
+            # Clean and truncate response if needed
+            cleaned_response = response_text.strip()
+            
+            # Basic truncation if too long (rough token estimation)
+            if len(cleaned_response) > max_tokens * 4:  # Rough estimate: 4 chars per token
+                cleaned_response = cleaned_response[:max_tokens * 4] + "..."
+            
+            self.logger.debug(
+                "Reasoning generated successfully",
+                response_length=len(cleaned_response)
+            )
+            
+            return cleaned_response
+            
+        except Exception as e:
+            self.logger.error("Reasoning generation failed", error=str(e))
+            raise RuntimeError(f"Failed to generate reasoning: {e}") 

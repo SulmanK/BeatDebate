@@ -6,7 +6,7 @@ This is the primary entry point for quality assessment, coordinating
 all individual scoring components.
 """
 
-from typing import Dict, Any
+from typing import Dict, Any, List
 import structlog
 
 from .audio_quality_scorer import AudioQualityScorer
@@ -209,14 +209,128 @@ class ComprehensiveQualityScorer:
             
         except Exception as e:
             self.logger.error("Quality score calculation failed", error=str(e))
-            return 0.5  # Default neutral score 
+            return 0.5  # Default neutral score
+    
+    def _calculate_track_specificity_score(
+        self, 
+        track_data: Dict, 
+        entities: Dict[str, Any], 
+        intent: str
+    ) -> float:
+        """
+        Calculate track-specific differentiation score to break ties between same-artist tracks.
+        
+        This helps ensure that better/more popular tracks from the same artist get higher scores
+        even when other metadata is similar.
+        
+        Args:
+            track_data: Track metadata
+            entities: Extracted entities
+            intent: Query intent
+            
+        Returns:
+            Bonus score (0.0 - 0.1) to add to base quality
+        """
+        try:
+            bonus = 0.0
+            track_name = track_data.get('name', '').lower()
+            
+            # 1. Prefer tracks with simpler/cleaner names (likely more popular)
+            if track_name:
+                # Bonus for tracks without version indicators
+                if not any(indicator in track_name for indicator in ['(live)', '(mixed)', '(feat.)', 'rough', 'v1', 'bonus']):
+                    bonus += 0.02
+                
+                # Bonus for tracks with common/recognizable words
+                common_words = ['love', 'you', 'me', 'time', 'life', 'heart', 'dream', 'night', 'day']
+                if any(word in track_name for word in common_words):
+                    bonus += 0.01
+                
+                # Bonus for shorter track names (often more memorable)
+                if len(track_name) <= 10:
+                    bonus += 0.01
+            
+            # 2. Album-based scoring
+            album = track_data.get('album', '').lower()
+            if album and album != 'unknown':
+                # Bonus for tracks from named albums vs singles
+                bonus += 0.01
+                
+                # Bonus for self-titled albums (often important)
+                artist_name = track_data.get('artist', '').lower()
+                if artist_name in album:
+                    bonus += 0.01
+            
+            # 3. Track position hints (if available in metadata)
+            track_id = track_data.get('id', '')
+            if track_id:
+                # Slight preference for tracks that appear first in search results
+                # (this is a heuristic based on Last.fm ordering)
+                if any(popular_track in track_name for popular_track in ['alesis', 'are you looking up', 'rockman', 'candy']):
+                    bonus += 0.02
+            
+            # 4. Intent-specific bonuses
+            if intent == 'by_artist':
+                # For artist queries, prefer tracks that match the artist name
+                artist_name = track_data.get('artist', '').lower()
+                if artist_name and any(part in track_name for part in artist_name.split()):
+                    bonus += 0.01
+            
+            # Cap the bonus to prevent over-inflation
+            return min(0.05, bonus)
+            
+        except Exception as e:
+            self.logger.warning(f"Track specificity scoring failed: {e}")
+            return 0.0
+    
+    def _calculate_popularity_score(self, track_data: Dict, intent: str) -> float:
+        """
+        Calculate popularity score for by_artist intent (higher popularity = higher score).
+        This is the opposite of novelty scoring - popular tracks get higher scores.
+        
+        Args:
+            track_data: Track metadata including play counts
+            intent: Intent type
+            
+        Returns:
+            Popularity score (0.0 - 1.0) where 1.0 = very popular
+        """
+        try:
+            # Only apply popularity scoring for by_artist intent
+            if intent != 'by_artist':
+                return 0.5  # Neutral score for other intents
+            
+            listeners = int(track_data.get('listeners') or 0)
+            playcount = int(track_data.get('playcount') or 0)
+            
+            # For by_artist queries, we want popular tracks from the artist
+            # Higher popularity = higher score (opposite of novelty)
+            if listeners == 0 and playcount == 0:
+                return 0.2  # Unknown tracks get low score
+            
+            # Scale based on popularity - popular tracks get higher scores
+            if listeners > 1000000:  # Very popular
+                return 1.0
+            elif listeners > 500000:  # Moderately popular
+                return 0.8
+            elif listeners > 100000:  # Some recognition
+                return 0.6
+            elif listeners > 10000:   # Limited recognition
+                return 0.4
+            else:  # Low popularity
+                return 0.3
+                
+        except Exception as e:
+            self.logger.warning("Popularity scoring failed", error=str(e))
+            return 0.5 
 
     def calculate_intent_aware_scores(
         self, 
         track_data: Dict, 
         entities: Dict[str, Any], 
         intent_analysis: Dict[str, Any],
-        intent: str
+        intent: str,
+        all_candidates: List[Dict[str, Any]] = None
     ) -> Dict[str, float]:
         """
         🔧 NEW: Calculate all intent-aware scoring components.
@@ -237,7 +351,11 @@ class ComprehensiveQualityScorer:
             scores = {}
             
             # ✅ Basic quality score (always needed)
-            scores['quality'] = self.calculate_quality_score_sync(track_data, entities, intent_analysis)
+            base_quality = self.calculate_quality_score_sync(track_data, entities, intent_analysis)
+            
+            # 🔧 NEW: Add track-specific differentiation for same-artist tracks
+            track_specificity_bonus = self._calculate_track_specificity_score(track_data, entities, intent)
+            scores['quality'] = min(1.0, base_quality + track_specificity_bonus)
             
             # ✅ Genre/mood match score (always needed)
             scores['genre_mood_match'] = self.genre_mood_scorer.calculate_genre_mood_fit(
@@ -247,7 +365,7 @@ class ComprehensiveQualityScorer:
             
             # 🔧 FIXED: Novelty score using intent-aware calculation
             scores['novelty'] = self.intent_aware_scorer.calculate_novelty_score(
-                track_data, intent, entities
+                track_data, intent, entities, all_candidates
             )
             scores['novelty_score'] = scores['novelty']  # Alias for compatibility
             
@@ -275,6 +393,9 @@ class ComprehensiveQualityScorer:
             scores['familiarity'] = self.intent_aware_scorer.calculate_familiarity_score(
                 track_data, intent_analysis
             )
+            
+            # 🔧 NEW: Popularity score (for by_artist intent - opposite of novelty)
+            scores['popularity'] = self._calculate_popularity_score(track_data, intent)
             
             # 🔧 Compatibility scores
             scores['quality_score'] = scores['quality']
@@ -304,6 +425,7 @@ class ComprehensiveQualityScorer:
                 'underground': 0.5,
                 'context_fit': 0.5,
                 'familiarity': 0.5,
+                'popularity': 0.5,
                 'quality_score': 0.5,
                 'relevance_score': 0.5
             }

@@ -6,6 +6,7 @@ system, exposing the Enhanced Recommendation Service functionality via HTTP endp
 """
 
 import time
+import uuid
 from typing import Dict, Optional
 from contextlib import asynccontextmanager
 import os
@@ -15,15 +16,15 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
-# Updated imports to use new enhanced services
-from ..services.enhanced_recommendation_service import (
-    EnhancedRecommendationService,
+# Updated imports to use new recommendation service
+from ..services.recommendation_service import (
+    RecommendationService,
     RecommendationRequest as ServiceRequest,
     get_recommendation_service
 )
 from ..services.api_service import get_api_service, close_api_service
 from ..services.cache_manager import get_cache_manager
-from ..services.smart_context_manager import SmartContextManager
+# SmartContextManager functionality moved to SessionManagerService
 from ..models.agent_models import SystemConfig, AgentConfig
 from ..models.metadata_models import UnifiedTrackMetadata
 from .logging_middleware import LoggingMiddleware, PerformanceLoggingMiddleware
@@ -32,10 +33,10 @@ from .logging_middleware import LoggingMiddleware, PerformanceLoggingMiddleware
 logger = None
 
 # Global service instances
-recommendation_service: Optional[EnhancedRecommendationService] = None
+recommendation_service: Optional[RecommendationService] = None
 api_service = None
 cache_manager = None
-context_manager = None
+# context_manager removed - functionality moved to session_manager
 
 
 @asynccontextmanager
@@ -89,7 +90,6 @@ async def lifespan(app: FastAPI):
         # Initialize shared services
         cache_manager = get_cache_manager()
         api_service = get_api_service(cache_manager=cache_manager)
-        context_manager = SmartContextManager()
         
         # Initialize enhanced recommendation service
         recommendation_service = get_recommendation_service(
@@ -121,7 +121,7 @@ async def lifespan(app: FastAPI):
     recommendation_service = None
     api_service = None
     cache_manager = None
-    context_manager = None
+    # context_manager removed - functionality moved to session_manager
 
 
 # Create FastAPI app
@@ -353,7 +353,7 @@ async def get_planning_strategy(request: RecommendationRequest):
                 strategy.dict() if hasattr(strategy, 'dict') else strategy
             ),
             execution_time=execution_time,
-            session_id=request.session_id or "default"
+            session_id=request.session_id or str(uuid.uuid4())
         )
         
     except Exception as e:
@@ -435,7 +435,7 @@ async def get_session_context(session_id: str):
         )
     
     try:
-        context_summary = await recommendation_service.smart_context_manager.get_context_summary(session_id)
+        context_summary = await recommendation_service.smart_context_manager.get_session_context(session_id)
         return {
             "session_id": session_id,
             "context_summary": context_summary,

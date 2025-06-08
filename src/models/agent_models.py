@@ -83,6 +83,7 @@ class MusicRecommenderState(BaseModel):
     
     # Judge phase - set by judge agent
     final_recommendations: Annotated[List[Dict], list_replace_reducer] = Field(default_factory=list, description="Final selected recommendations")
+    judge_metadata: Annotated[Optional[Dict[str, Any]], keep_first] = Field(default=None, description="Metadata about judge decision process")
     
     # Reasoning transparency - can be updated by any agent
     reasoning_log: Annotated[List[str], list_append_reducer] = Field(default_factory=list, description="Step-by-step reasoning log")
@@ -99,6 +100,7 @@ class MusicRecommenderState(BaseModel):
 
     # NEW: For intent override system
     context_override: Annotated[Optional[Dict[str, Any]], keep_first] = Field(default=None, description="Context override for intent system")
+    effective_intent: Annotated[Optional[Dict[str, Any]], keep_first] = Field(default=None, description="Effective intent combining query analysis and context override")
 
 
 class AgentStrategy(BaseModel):
@@ -215,7 +217,7 @@ class AgentConfig(BaseModel):
     llm_model: str = Field(default="gemini-2.0-flash-exp", description="LLM model to use")
     temperature: float = Field(default=0.7, ge=0.0, le=2.0, description="LLM temperature")
     max_tokens: int = Field(default=1000, description="Maximum tokens for LLM response")
-    timeout_seconds: int = Field(default=30, description="Timeout for agent processing")
+    timeout_seconds: int = Field(default=60, description="Timeout for agent processing")
     
     # Agent-specific configuration
     specialty_config: Dict[str, Any] = Field(default_factory=dict, description="Agent-specific configuration")
@@ -253,10 +255,12 @@ class QueryIntent(Enum):
     BY_ARTIST = "by_artist"                     # "Music by X" - focus on artist's own tracks
     BY_ARTIST_UNDERGROUND = "by_artist_underground"  # "Discover underground tracks by X" - focus on artist's deep cuts/b-sides
     ARTIST_SIMILARITY = "artist_similarity"      # "Music like X" - focus on similarity
+    ARTIST_GENRE = "artist_genre"               # "Songs by X that are Y genre" - artist tracks filtered by genre
     DISCOVERY = "discovery"                      # "Something new and different" - focus on novelty
+    DISCOVERING_SERENDIPITY = "discovering_serendipity"  # "Surprise me with something unexpected" - focus on serendipitous discovery
     GENRE_MOOD = "genre_mood"                   # "Upbeat electronic music" - focus on style/vibe
     CONTEXTUAL = "contextual"                   # "Music for studying" - focus on functional fit
-    HYBRID = "hybrid"                           # "Chill songs like Bon Iver" - mixed intents
+    HYBRID_SIMILARITY_GENRE = "hybrid_similarity_genre"  # "Music like [Artist] but [Genre]" - artist similarity + genre filtering
     
     # Legacy compatibility (can be removed after migration)
     GENRE_EXPLORATION = "genre_exploration"      # Maps to GENRE_MOOD

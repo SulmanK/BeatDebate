@@ -701,53 +701,87 @@ class SessionManagerService:
             pass
     
     async def _track_entity_evolution(self, session: Dict[str, Any], entities: Dict[str, Any]):
-        """Track how user's entity preferences evolve over time."""
-        entity_evolution = session["entity_evolution"]
-        timestamp = datetime.now().isoformat()
+        """Track how entities evolve across the session."""
+        entity_evolution = session.get("entity_evolution", {})
         
-        # Track genre evolution
-        if "genres" in entities:
-            if "genres" not in entity_evolution:
-                entity_evolution["genres"] = []
-            entity_evolution["genres"].append({
-                "timestamp": timestamp,
-                "entities": entities["genres"]
-            })
+        for entity_type, entity_data in entities.items():
+            if entity_type not in entity_evolution:
+                entity_evolution[entity_type] = []
+            
+            if isinstance(entity_data, list):
+                for entity in entity_data:
+                    if isinstance(entity, str):
+                        entity_name = entity
+                    elif isinstance(entity, dict):
+                        entity_name = entity.get('name', str(entity))
+                    else:
+                        entity_name = str(entity)
+                    
+                    if entity_name not in [e['name'] for e in entity_evolution[entity_type]]:
+                        entity_evolution[entity_type].append({
+                            'name': entity_name,
+                            'first_mentioned': datetime.now(),
+                            'frequency': 1
+                        })
+                    else:
+                        for e in entity_evolution[entity_type]:
+                            if e['name'] == entity_name:
+                                e['frequency'] += 1
+                                break
         
-        # Track artist evolution
-        if "artists" in entities:
-            if "artists" not in entity_evolution:
-                entity_evolution["artists"] = []
-            entity_evolution["artists"].append({
-                "timestamp": timestamp,
-                "entities": entities["artists"]
-            })
+        session["entity_evolution"] = entity_evolution
+    
+    async def save_recommendations(self, session_id: str, recommendations_data: Dict[str, Any]):
+        """
+        Save recommendations to session history.
         
-        # Keep only recent evolution data (last 20 entries per type)
-        for entity_type in entity_evolution:
-            if len(entity_evolution[entity_type]) > 20:
-                entity_evolution[entity_type] = entity_evolution[entity_type][-20:]
+        Args:
+            session_id: Session identifier
+            recommendations_data: Recommendation data to save
+        """
+        if session_id not in self.session_store:
+            self.logger.warning(f"Session {session_id} not found for saving recommendations")
+            return
+        
+        session = self.session_store[session_id]
+        
+        # Add to recommendation history
+        recommendation_entry = {
+            "timestamp": datetime.now(),
+            "recommendations": recommendations_data,
+            "session_id": session_id
+        }
+        
+        if "recommendation_history" not in session:
+            session["recommendation_history"] = []
+        
+        session["recommendation_history"].append(recommendation_entry)
+        session["last_updated"] = datetime.now()
+        
+        self.logger.info(f"Saved recommendations to session {session_id}")
     
     async def _cleanup_session_if_needed(self, session: Dict[str, Any]):
-        """Clean up session data if it's getting too large."""
-        interaction_history = session["interaction_history"]
+        """Clean up session if it becomes too large or old."""
+        interaction_count = len(session.get("interaction_history", []))
         
-        if len(interaction_history) > self.max_interactions_per_session:
+        # Clean up if too many interactions
+        if interaction_count > self.max_interactions_per_session:
             # Keep only the most recent interactions
-            session["interaction_history"] = interaction_history[-self.max_interactions_per_session:]
-            self.logger.info("Cleaned up session interaction history")
+            keep_count = self.max_interactions_per_session // 2
+            session["interaction_history"] = session["interaction_history"][-keep_count:]
+            self.logger.info(f"Cleaned up session history, keeping {keep_count} recent interactions")
         
-        # Clean up expired candidate pools
-        candidate_pools = session.get("candidate_pools", {})
-        expired_keys = []
+        # Clean up old candidate pools
+        pools_to_remove = []
+        for pool_key, pool_data in session.get("candidate_pools", {}).items():
+            try:
+                pool = CandidatePool.from_dict(pool_data)
+                if pool.is_expired(self.candidate_pool_max_age_minutes):
+                    pools_to_remove.append(pool_key)
+            except Exception as e:
+                self.logger.warning(f"Failed to parse candidate pool {pool_key}: {e}")
+                pools_to_remove.append(pool_key)
         
-        for key, pool_data in candidate_pools.items():
-            candidate_pool = CandidatePool.from_dict(pool_data)
-            if not candidate_pool.can_be_reused(self.candidate_pool_max_age_minutes):
-                expired_keys.append(key)
-        
-        for key in expired_keys:
-            del candidate_pools[key]
-        
-        if expired_keys:
-            self.logger.info("Cleaned up expired candidate pools", count=len(expired_keys)) 
+        for pool_key in pools_to_remove:
+            del session["candidate_pools"][pool_key]
+            self.logger.debug(f"Removed expired candidate pool: {pool_key}") 

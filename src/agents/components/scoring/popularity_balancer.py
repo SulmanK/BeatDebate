@@ -115,7 +115,7 @@ class PopularityBalancer:
         
         # Check if it's a hybrid intent
         intent_type = intent_analysis.get('primary_intent', '')
-        is_hybrid_intent = intent_type == 'hybrid' or 'hybrid' in str(intent_type).lower()
+        is_hybrid_intent = intent_type == 'hybrid_similarity_genre' or 'hybrid' in str(intent_type).lower()
         
         # All conditions must be true for genre-hybrid query
         return has_genres and has_artist_similarity and is_hybrid_intent 

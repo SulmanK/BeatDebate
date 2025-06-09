@@ -55,7 +55,7 @@ class RankingLogic:
             Ranked list of (track, scores) tuples
         """
         try:
-            from ..components.quality_scorer import QualityScorer
+            from ..components import QualityScorer
             
             # Initialize quality scorer for intent-aware scoring
             quality_scorer = QualityScorer()
@@ -133,15 +133,24 @@ class RankingLogic:
                         source_has_additional_scores=bool(additional_scores)
                     )
                     
-                    # 🚨 CRITICAL FIX: Detect and reject fake/fallback tracks  
-                    # Tracks with 0 listeners AND 0 playcount are clearly fake fallback data
-                    if playcount == 0 and listeners == 0:
+                    # Allow tracks with zero popularity but assign them lower scores
+                    # Only reject tracks with obviously fake names or missing data
+                    track_name = getattr(track_rec, 'name', getattr(track_rec, 'title', 'Unknown'))
+                    if track_name == 'Unknown' or track_rec.artist == 'Unknown' or not track_rec.artist:
                         self.logger.warning(
-                            "🚨 Rejecting fake track with no popularity data",
-                            track=f"{track_rec.artist} - {getattr(track_rec, 'name', getattr(track_rec, 'title', 'Unknown'))}",
-                            reason="Zero listeners and playcount indicates fallback/fake data"
+                            "🚨 Rejecting track with missing/unknown data",
+                            track=f"{track_rec.artist} - {track_name}",
+                            reason="Missing artist/track name indicates invalid data"
                         )
-                        continue  # Skip this fake track completely
+                        continue  # Skip truly invalid tracks
+                    
+                    # Log tracks with zero popularity but allow them for discovery
+                    if playcount == 0 and listeners == 0:
+                        self.logger.debug(
+                            "🎵 Processing track with zero popularity (discovery mode)",
+                            track=f"{track_rec.artist} - {track_name}",
+                            note="Will receive lower scores but not rejected"
+                        )
                     
                     # Calculate all intent-aware scoring components
                     intent_scores = quality_scorer.calculate_intent_aware_scores(
@@ -1057,8 +1066,8 @@ class RankingLogic:
                 'max_per_source': 12    # Balanced source distribution
             },
             'discovery': {
-                'max_per_artist': 1,    # Strict diversity for discovery
-                'max_per_genre': 3, 
+                'max_per_artist': 3,    # Increased from 1 to 3 for better discovery exploration
+                'max_per_genre': 5,     # Increased from 3 to 5 for more variety
                 'min_genres': 4
             },
             'genre_mood': {

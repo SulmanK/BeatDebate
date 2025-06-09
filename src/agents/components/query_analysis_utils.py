@@ -35,6 +35,14 @@ class QueryAnalysisUtils:
                 'new', 'different', 'unknown', 'underground', 'hidden',
                 'fresh', 'novel', 'rare', 'obscure', 'gems'
             ],
+            'discovering_serendipity': [
+                'surprise me', 'something unexpected', 'serendipity', 'random',
+                'anything', 'whatever', 'dealer\'s choice', 'mix it up',
+                'something completely different', 'something completely new and different',
+                'blow my mind', 'amaze me', 'something wild', 'take me on a journey', 
+                'adventure', 'shock me', 'something crazy', 'something out of left field',
+                'completely different', 'totally different', 'entirely different'
+            ],
             'similarity': [
                 'like', 'similar', 'sounds like', 'reminds me of',
                 'style of', 'same as', 'comparable to'
@@ -118,20 +126,25 @@ class QueryAnalysisUtils:
         query_lower = query.lower()
         intent_scores = {}
         
-        # Score each intent category
+        # Score each intent category with phrase prioritization
         for intent, patterns in self.intent_patterns.items():
             score = 0
             matched_patterns = []
             
-            for pattern in patterns:
+            # Sort patterns by length (longer phrases first) to prioritize specific phrases
+            sorted_patterns = sorted(patterns, key=len, reverse=True)
+            
+            for pattern in sorted_patterns:
                 if pattern in query_lower:
-                    score += 1
+                    # Give higher weight to longer, more specific phrases
+                    pattern_weight = len(pattern.split()) if ' ' in pattern else 1
+                    score += pattern_weight
                     matched_patterns.append(pattern)
             
             if score > 0:
                 intent_scores[intent] = {
                     'score': score,
-                    'confidence': min(0.9, score * 0.3),
+                    'confidence': min(0.9, score * 0.2),  # Adjusted for weighted scoring
                     'matched_patterns': matched_patterns
                 }
         
@@ -618,8 +631,8 @@ class QueryAnalysisUtils:
                 if len(match) > 2 and match not in genre_hints:
                     # Check if it's a known genre or genre-like term
                     if (match in genres or 
-                        any(genre_word in match for genre_word in ['jazz', 'rock', 'pop', 'electronic', 'soul', 'funk']) or
-                        match.endswith('y') and len(match) > 4):  # jazzy, rocky, etc.
+                            any(genre_word in match for genre_word in ['jazz', 'rock', 'pop', 'electronic', 'soul', 'funk']) or
+                            match.endswith('y') and len(match) > 4):  # jazzy, rocky, etc.
                         genre_hints.append(match)
         
         # Remove duplicates while preserving order

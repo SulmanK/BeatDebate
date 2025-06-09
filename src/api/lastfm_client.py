@@ -183,12 +183,39 @@ class LastFmClient(BaseAPIClient):
                     track_list = [track_list]
                     
                 for track_data in track_list:
+                    # Extract listeners and playcount first
+                    listeners = int(track_data.get("listeners", 0))
+                    playcount = int(track_data.get("playcount", 0))
+                    
+                    # For discovery, allow tracks with zero popularity but only skip if missing essential data
+                    track_name = track_data.get("name", "")
+                    artist_name = track_data.get("artist", "")
+                    
+                    if not track_name or not artist_name:
+                        self.logger.debug(
+                            "Skipping track with missing name/artist",
+                            track=track_name,
+                            artist=artist_name,
+                            query=query
+                        )
+                        continue
+                    
+                    # Log when tracks have zero popularity but still include them
+                    if listeners == 0 and playcount == 0:
+                        self.logger.debug(
+                            "Including track with zero popularity (discovery mode)",
+                            track=track_name,
+                            artist=artist_name,
+                            query=query
+                        )
+                    
                     track = TrackMetadata(
-                        name=track_data.get("name", ""),
-                        artist=track_data.get("artist", ""),
+                        name=track_name,
+                        artist=artist_name,
                         mbid=track_data.get("mbid"),
                         url=track_data.get("url"),
-                        listeners=int(track_data.get("listeners", 0)),
+                        listeners=listeners,
+                        playcount=playcount
                     )
                     tracks.append(track)
                     
@@ -309,11 +336,41 @@ class LastFmClient(BaseAPIClient):
                     track_list = [track_list]
                     
                 for track_data in track_list:
+                    # Extract listeners and playcount first
+                    listeners = int(track_data.get("listeners", 0))
+                    playcount = int(track_data.get("playcount", 0))
+                    
+                    # For discovery, allow tracks with zero popularity but only skip if missing essential data
+                    track_name = track_data.get("name", "")
+                    artist_name = track_data.get("artist", {}).get("name", "")
+                    
+                    if not track_name or not artist_name:
+                        self.logger.debug(
+                            "Skipping track with missing name/artist",
+                            track=track_name,
+                            artist=artist_name,
+                            seed_artist=artist,
+                            seed_track=track
+                        )
+                        continue
+                    
+                    # Log when tracks have zero popularity but still include them
+                    if listeners == 0 and playcount == 0:
+                        self.logger.debug(
+                            "Including track with zero popularity (discovery mode)",
+                            track=track_name,
+                            artist=artist_name,
+                            seed_artist=artist,
+                            seed_track=track
+                        )
+                    
                     track = TrackMetadata(
-                        name=track_data.get("name", ""),
-                        artist=track_data.get("artist", {}).get("name", ""),
+                        name=track_name,
+                        artist=artist_name,
                         mbid=track_data.get("mbid"),
                         url=track_data.get("url"),
+                        listeners=listeners,
+                        playcount=playcount
                     )
                     tracks.append(track)
                     
@@ -470,7 +527,7 @@ class LastFmClient(BaseAPIClient):
                     "tag.getTopTracks",
                     {
                         "tag": tag,
-                        "limit": min(limit // len(tags), 10)  # Distribute across tags
+                        "limit": min(limit // len(tags), 200)  # Allow much higher per-tag limit
                     }
                 )
                 
@@ -480,12 +537,41 @@ class LastFmClient(BaseAPIClient):
                         track_list = [track_list]
                         
                     for track_data in track_list:
+                        # Extract listeners and playcount first
+                        listeners = int(track_data.get("listeners", 0))
+                        playcount = int(track_data.get("playcount", 0))
+                        
+                        # For discovery, allow tracks with zero popularity but flag with low confidence
+                        # Only skip tracks with no name/artist (truly invalid data)
+                        track_name = track_data.get("name", "")
+                        artist_name = track_data.get("artist", {}).get("name", "")
+                        
+                        if not track_name or not artist_name:
+                            self.logger.debug(
+                                "Skipping track with missing name/artist",
+                                track=track_name,
+                                artist=artist_name,
+                                tag=tag
+                            )
+                            continue
+                        
+                        # Log when tracks have zero popularity but still include them
+                        if listeners == 0 and playcount == 0:
+                            self.logger.debug(
+                                "Including track with zero popularity (discovery mode)",
+                                track=track_name,
+                                artist=artist_name,
+                                tag=tag
+                            )
+                        
                         track = TrackMetadata(
-                            name=track_data.get("name", ""),
-                            artist=track_data.get("artist", {}).get("name", ""),
+                            name=track_name,
+                            artist=artist_name,
                             mbid=track_data.get("mbid"),
                             url=track_data.get("url"),
                             tags=[tag],  # Add the search tag
+                            listeners=listeners,
+                            playcount=playcount
                         )
                         tracks.append(track)
                         
@@ -508,7 +594,8 @@ class LastFmClient(BaseAPIClient):
     async def get_artist_top_tracks(
         self, 
         artist: str, 
-        limit: int = 20
+        limit: int = 20,
+        page: int = 1
     ) -> List[TrackMetadata]:
         """
         Get top tracks for an artist.
@@ -516,6 +603,7 @@ class LastFmClient(BaseAPIClient):
         Args:
             artist: Artist name
             limit: Maximum results
+            page: Page number (1-indexed)
             
         Returns:
             List of top tracks for the artist
@@ -525,7 +613,8 @@ class LastFmClient(BaseAPIClient):
                 "artist.getTopTracks",
                 {
                     "artist": artist,
-                    "limit": limit
+                    "limit": limit,
+                    "page": page
                 }
             )
             
@@ -536,13 +625,39 @@ class LastFmClient(BaseAPIClient):
                     track_list = [track_list]
                     
                 for track_data in track_list:
+                    # Extract listeners and playcount first
+                    listeners = int(track_data.get("listeners", 0))
+                    playcount = int(track_data.get("playcount", 0))
+                    
+                    # For discovery, allow tracks with zero popularity but only skip if missing essential data
+                    track_name = track_data.get("name", "")
+                    artist_name = track_data.get("artist", {}).get("name", artist)
+                    
+                    if not track_name or not artist_name:
+                        self.logger.debug(
+                            "Skipping track with missing name/artist",
+                            track=track_name,
+                            artist=artist_name,
+                            target_artist=artist
+                        )
+                        continue
+                    
+                    # Log when tracks have zero popularity but still include them
+                    if listeners == 0 and playcount == 0:
+                        self.logger.debug(
+                            "Including track with zero popularity (discovery mode)",
+                            track=track_name,
+                            artist=artist_name,
+                            target_artist=artist
+                        )
+                    
                     track = TrackMetadata(
-                        name=track_data.get("name", ""),
-                        artist=track_data.get("artist", {}).get("name", artist),
+                        name=track_name,
+                        artist=artist_name,
                         mbid=track_data.get("mbid"),
                         url=track_data.get("url"),
-                        listeners=int(track_data.get("listeners", 0)),
-                        playcount=int(track_data.get("playcount", 0))
+                        listeners=listeners,
+                        playcount=playcount
                     )
                     tracks.append(track)
                     
@@ -623,6 +738,141 @@ class LastFmClient(BaseAPIClient):
                 error=str(e)
             )
             return []
+    
+    async def search_underground_tracks_by_tags(
+        self, 
+        tags: List[str], 
+        limit: int = 20,
+        max_listeners: int = 50000
+    ) -> List[TrackMetadata]:
+        """
+        Search for underground tracks by tags using track.search instead of tag.getTopTracks.
+        
+        This method specifically targets underground tracks by:
+        1. Using track.search instead of tag.getTopTracks (which returns popular tracks)
+        2. Searching with underground-specific query terms
+        3. Filtering results by listener thresholds
+        
+        Args:
+            tags: List of tags (e.g., ["minimal techno", "experimental electronic"])
+            limit: Maximum results
+            max_listeners: Maximum listener count for "underground" classification
+            
+        Returns:
+            List of underground tracks matching tags
+        """
+        underground_tracks = []
+        
+        # Create underground-focused search queries
+        underground_queries = []
+        for tag in tags:
+            # Primary tag search
+            underground_queries.append(tag)
+            # Add underground modifiers
+            underground_queries.extend([
+                f"{tag} underground",
+                f"{tag} minimal",
+                f"{tag} experimental",
+                f"underground {tag}",
+                f"minimal {tag}"
+            ])
+        
+        # Limit queries to avoid rate limiting
+        search_queries = underground_queries[:min(len(underground_queries), 8)]
+        
+        for query in search_queries:
+            try:
+                data = await self._make_lastfm_request(
+                    "track.search",  # Using track.search instead of tag.getTopTracks
+                    {
+                        "track": query,
+                        "limit": max(5, limit // len(search_queries))  # Distribute across queries
+                    }
+                )
+                
+                if "results" in data and "trackmatches" in data["results"]:
+                    track_matches = data["results"]["trackmatches"]
+                    track_list = track_matches.get("track", [])
+                    
+                    if isinstance(track_list, dict):
+                        track_list = [track_list]
+                    
+                    for track_data in track_list:
+                        listeners = int(track_data.get("listeners", 0))
+                        playcount = int(track_data.get("playcount", 0))
+                        
+                        track_name = track_data.get("name", "")
+                        artist_name = track_data.get("artist", "")
+                        
+                        if not track_name or not artist_name:
+                            continue
+                        
+                        # Apply underground filtering: strict listener limits
+                        is_underground = (
+                            listeners <= max_listeners or  # Low listener count
+                            listeners == 0 or             # Unknown (potentially very underground)
+                            playcount < max_listeners * 20  # Low playcount relative to listeners
+                        )
+                        
+                        if is_underground:
+                            self.logger.debug(
+                                "Found underground track",
+                                track=track_name,
+                                artist=artist_name,
+                                listeners=listeners,
+                                query=query
+                            )
+                            
+                            track = TrackMetadata(
+                                name=track_name,
+                                artist=artist_name,
+                                mbid=track_data.get("mbid"),
+                                url=track_data.get("url"),
+                                tags=[query],  # Add the search query as context
+                                listeners=listeners,
+                                playcount=playcount
+                            )
+                            underground_tracks.append(track)
+                        else:
+                            self.logger.debug(
+                                "Filtering out popular track",
+                                track=track_name,
+                                artist=artist_name,
+                                listeners=listeners,
+                                max_allowed=max_listeners
+                            )
+                        
+            except Exception as e:
+                self.logger.warning(
+                    "Underground track search failed for query",
+                    query=query,
+                    error=str(e)
+                )
+                continue
+        
+        # Remove duplicates and sort by "undergroundness" (lower listener count = more underground)
+        seen_tracks = set()
+        unique_tracks = []
+        
+        for track in underground_tracks:
+            track_key = f"{track.artist.lower()}::{track.name.lower()}"
+            if track_key not in seen_tracks:
+                seen_tracks.add(track_key)
+                unique_tracks.append(track)
+        
+        # Sort by listener count (ascending - fewer listeners = more underground)
+        unique_tracks.sort(key=lambda t: t.listeners or 0)
+        
+        self.logger.info(
+            "Underground track search completed",
+            original_tags=tags,
+            search_queries_used=len(search_queries),
+            total_found=len(underground_tracks),
+            unique_results=len(unique_tracks),
+            max_listeners_threshold=max_listeners
+        )
+        
+        return unique_tracks[:limit]
 
 
 # Legacy compatibility - maintain the old RateLimiter class for backward compatibility

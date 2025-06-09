@@ -267,7 +267,7 @@ class UnifiedTrackMetadata:
             "tags": self.tags,
             "genres": self.genres,
             "similar_tracks": self.similar_tracks,
-            "source": self.source.value,
+            "source": self.source.value if hasattr(self.source, 'value') else str(self.source),
             "underground_score": self.underground_score,
             "quality_score": self.quality_score,
             "recommendation_score": self.recommendation_score,
@@ -278,6 +278,56 @@ class UnifiedTrackMetadata:
             "spotify_data": self.spotify_data,
             "lastfm_data": self.lastfm_data
         }
+    
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> "UnifiedTrackMetadata":
+        """
+        Create UnifiedTrackMetadata from dictionary representation.
+        
+        Args:
+            data: Dictionary containing track metadata
+            
+        Returns:
+            UnifiedTrackMetadata instance
+        """
+        # Handle datetime conversion
+        if 'last_updated' in data and isinstance(data['last_updated'], str):
+            try:
+                data['last_updated'] = datetime.fromisoformat(data['last_updated'])
+            except (ValueError, TypeError):
+                data['last_updated'] = datetime.utcnow()
+        
+        # Handle MetadataSource enum
+        if 'source' in data:
+            if isinstance(data['source'], str):
+                try:
+                    data['source'] = MetadataSource(data['source'])
+                except ValueError:
+                    data['source'] = MetadataSource.UNIFIED
+        
+        # Remove any extra fields not in the dataclass
+        valid_fields = {
+            'name', 'artist', 'album', 'duration_ms', 'spotify_id', 'lastfm_mbid',
+            'preview_url', 'external_urls', 'popularity', 'listeners', 'playcount',
+            'tags', 'genres', 'similar_tracks', 'source', 'source_data', 'last_updated',
+            'underground_score', 'quality_score', 'recommendation_score', 'recommendation_reason',
+            'agent_source', 'audio_features', 'spotify_data', 'lastfm_data'
+        }
+        
+        filtered_data = {k: v for k, v in data.items() if k in valid_fields}
+        
+        # Ensure required fields have defaults
+        filtered_data.setdefault('name', '')
+        filtered_data.setdefault('artist', '')
+        filtered_data.setdefault('tags', [])
+        filtered_data.setdefault('genres', [])
+        filtered_data.setdefault('similar_tracks', [])
+        filtered_data.setdefault('external_urls', {})
+        filtered_data.setdefault('source_data', {})
+        filtered_data.setdefault('source', MetadataSource.UNIFIED)
+        filtered_data.setdefault('last_updated', datetime.utcnow())
+        
+        return cls(**filtered_data)
 
 
 @dataclass
@@ -370,7 +420,7 @@ class UnifiedArtistMetadata:
             "genres": self.genres,
             "similar_artists": self.similar_artists,
             "bio": self.bio,
-            "source": self.source.value,
+            "source": self.source.value if hasattr(self.source, 'value') else str(self.source),
             "last_updated": self.last_updated.isoformat()
         }
 
@@ -391,7 +441,7 @@ class SearchResult:
             "tracks": [track.to_dict() for track in self.tracks],
             "artists": [artist.to_dict() for artist in self.artists],
             "query": self.query,
-            "source": self.source.value,
+            "source": self.source.value if hasattr(self.source, 'value') else str(self.source),
             "total_results": self.total_results,
             "search_time_ms": self.search_time_ms
         }

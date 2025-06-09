@@ -133,63 +133,79 @@ uv run mypy src/
 
 The project is organized into distinct layers and components:
 
-```
 beatDebate/
-├── Design/                  # Design documents, plans, and refactoring notes
+├── Design/                  # Design documents and refactoring notes
 ├── scripts/                 # Utility and validation scripts (e.g., validate_lastfm.py)
 ├── src/                     # Main source code
 │   ├── agents/              # Core AI agent implementations
 │   │   ├── base_agent.py    # Abstract base class for all agents
 │   │   ├── components/      # Shared utilities for agents
-│   │   │   ├── llm_utils.py
+│   │   │   ├── __init__.py
+│   │   │   ├── candidate_processor.py
 │   │   │   ├── entity_extraction_utils.py
+│   │   │   ├── llm_utils.py
 │   │   │   ├── query_analysis_utils.py
 │   │   │   ├── unified_candidate_generator.py
-│   │   │   └── quality_scorer.py
-│   │   ├── planner/         # PlannerAgent and its specific modules
-│   │   │   ├── agent.py     # PlannerAgent logic
-│   │   │   └── query_understanding_engine.py
-│   │   ├── genre_mood/      # GenreMoodAgent and its specific modules
+│   │   │   ├── scoring/
+│   │   │   └── generation_strategies/
+│   │   ├── discovery/       # DiscoveryAgent and its specific components
 │   │   │   ├── agent.py
-│   │   │   └── mood_logic.py, tag_generator.py
-│   │   ├── discovery/       # DiscoveryAgent and its specific modules
+│   │   │   ├── discovery_config.py
+│   │   │   ├── discovery_diversity.py
+│   │   │   ├── discovery_filter.py
+│   │   │   ├── discovery_scorer.py
+│   │   │   ├── similarity_explorer.py
+│   │   │   └── underground_detector.py
+│   │   ├── genre_mood/      # GenreMoodAgent and its specific components
 │   │   │   ├── agent.py
-│   │   │   └── similarity_explorer.py, underground_detector.py
-│   │   └── judge/           # JudgeAgent and its specific modules
+│   │   │   ├── mood_logic.py
+│   │   │   ├── tag_generator.py
+│   │   │   └── components/
+│   │   ├── judge/           # JudgeAgent and its specific components
+│   │   │   ├── agent.py
+│   │   │   ├── explainer.py
+│   │   │   ├── ranking_logic.py
+│   │   │   └── components/
+│   │   └── planner/         # PlannerAgent and its specific components
 │   │       ├── agent.py
-│   │       └── ranking_logic.py, explainer.py
+│   │       ├── context_analyzer.py
+│   │       ├── entity_processor.py
+│   │       ├── entity_recognizer.py
+│   │       ├── query_analyzer.py
+│   │       ├── query_understanding_engine.py
+│   │       └── strategy_planner.py
 │   ├── api/                 # FastAPI backend and external API clients
-│   │   ├── backend.py       # FastAPI application exposing endpoints
-│   │   ├── base_client.py   # Base class for Last.fm/Spotify clients
+│   │   ├── backend.py
+│   │   ├── base_client.py
+│   │   ├── client_factory.py
 │   │   ├── lastfm_client.py
-│   │   ├── spotify_client.py
-│   │   ├── rate_limiter.py  # UnifiedRateLimiter
-│   │   ├── client_factory.py# For creating API client instances
-│   │   └── logging_middleware.py # For API request/response logging
+│   │   ├── logging_middleware.py
+│   │   ├── rate_limiter.py
+│   │   └── spotify_client.py
 │   ├── models/              # Pydantic data models and schemas
-│   │   ├── agent_models.py  # MusicRecommenderState, AgentConfig, etc.
-│   │   ├── metadata_models.py # UnifiedTrackMetadata, etc.
-│   │   └── recommendation_models.py # TrackRecommendation
+│   │   ├── agent_models.py
+│   │   ├── metadata_models.py
+│   │   └── recommendation_models.py
 │   ├── services/            # Business logic and service orchestration
-│   │   ├── enhanced_recommendation_service.py # Main service, orchestrates LangGraph
-│   │   ├── api_service.py   # Centralized access to external API clients
-│   │   ├── metadata_service.py# Unified metadata operations
-│   │   ├── conversation_context_service.py # Manages session data
-│   │   ├── smart_context_manager.py # Decides context handling strategy
-│   │   └── cache_manager.py # Caching for API responses (using diskcache)
+│   │   ├── api_service.py
+│   │   ├── cache_manager.py
+│   │   ├── intent_orchestration_service.py
+│   │   ├── llm_fallback_service.py
+│   │   ├── metadata_service.py
+│   │   ├── recommendation_service.py
+│   │   ├── session_manager_service.py
+│   │   └── components/      # Modular service components
 │   ├── ui/                  # Gradio user interface components
-│   │   ├── chat_interface.py# Main Gradio UI layout and logic
-│   │   ├── response_formatter.py # Formats recommendations for display
-│   │   └── planning_display.py # (For visualizing planner strategy - if integrated)
-│   ├── utils/               # Shared utility functions
-│   │   └── logging_config.py# Centralized logging setup (structlog)
-│   └── main.py              # Application entry point, launches FastAPI & Gradio
+│   │   ├── chat_interface.py
+│   │   ├── planning_display.py
+│   │   └── response_formatter.py
+│   ├── utils/               # Shared utility functions (e.g., logging)
+│   │   └── logging_config.py
+│   └── main.py              # Application entry point
 ├── tests/                   # Unit and integration tests
-├── data/                    # Local data, cache, validation outputs (managed by .gitignore)
-├── .env.example             # Example environment file
-├── pyproject.toml           # Project dependencies and build configuration
-└── README.md
-```
+├── .env.example
+├── README.md
+...
 
 ## 🎵 Usage Examples
 

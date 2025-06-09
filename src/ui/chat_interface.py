@@ -30,12 +30,12 @@ logger = logging.getLogger(__name__)
 # Query examples from intent-aware recommendation system design document
 QUERY_EXAMPLES = {
     "By Artist": [
-        "Music by Mk.gee",
-        "Songs by Michael Jackson that are R&B", 
+        "Songs by Mk.gee",
+        "Give me tracks by Radiohead", 
         "Play some Beatles songs"
     ],
     "Artist Similarity": [
-        "Music like Mk.gee",
+        "Songs like Mk.gee",
         "Similar artists to BROCKHAMPTON", 
         "Songs that sound like Radiohead"
     ],
@@ -55,8 +55,8 @@ QUERY_EXAMPLES = {
         "Background music for coding"
     ],
     "Hybrid": [
-        "Music like Kendrick Lamar but jazzy",
-        "Chill songs like Bon Iver",
+        "Songs like Kendrick Lamar but jazzy",
+        "Songs by Michael Jackson that are R&B",
         "Electronic music similar to Aphex Twin"
     ],
     "Follow-ups": [

@@ -6,8 +6,6 @@ planning system with real-time progress indicators and planning visualization.
 """
 
 import logging
-import time
-import uuid
 from typing import Dict, List, Optional, Tuple, Any
 
 import gradio as gr
@@ -93,16 +91,16 @@ class BeatDebateChatInterface:
         self.backend_url = backend_url
         self.response_formatter = ResponseFormatter()
         self.planning_display = PlanningDisplay()
-        self.session_id = str(uuid.uuid4())
-        self.conversation_history: List[Dict[str, Any]] = []
+        # ✅ REMOVED: Global session management - now handled per-user via gr.State
+        # ✅ REMOVED: Global conversation history - now managed by backend session store
         
         # Initialize fallback service
         self.fallback_service = None
         self._initialize_fallback_service()
         
         logger.info(
-            f"BeatDebate Chat Interface initialized with session: "
-            f"{self.session_id}, fallback_available: {self.fallback_service is not None}"
+            f"BeatDebate Chat Interface initialized (multi-user safe), "
+            f"fallback_available: {self.fallback_service is not None}"
         )
     
     def _initialize_fallback_service(self) -> None:
@@ -143,27 +141,29 @@ class BeatDebateChatInterface:
     async def process_message(
         self, 
         message: str, 
-        history: List[Tuple[str, str]]
-    ) -> Tuple[str, List[Tuple[str, str]], str]:
+        history: List[Tuple[str, str]],
+        session_id: str
+    ) -> Tuple[str, List[Tuple[str, str]], str, str]:
         """
         Process user message and return response with track info.
-        Enhanced with fallback support for unknown intents and failures.
+        Enhanced with fallback support and per-user session management.
         
         Args:
             message: User input message
             history: Chat history as list of (user, assistant) tuples
+            session_id: User-specific session identifier
             
         Returns:
-            Tuple of (response, updated_history, lastfm_player_html)
+            Tuple of (response, updated_history, lastfm_player_html, updated_session_id)
         """
         if not message.strip():
-            return "", history, ""
+            return "", history, "", session_id
         
-        logger.info(f"Processing message: {message}")
+        logger.info(f"Processing message: {message} for session: {session_id}")
         
         try:
-            # Primary: Get recommendations from 4-agent system
-            recommendations_response = await self._get_recommendations(message)
+            # Primary: Get recommendations from 4-agent system with session ID
+            recommendations_response = await self._get_recommendations(message, session_id)
             
             # Check if fallback is needed
             should_fallback, trigger_reason = self._should_use_fallback(
@@ -171,12 +171,15 @@ class BeatDebateChatInterface:
             )
             
             if should_fallback:
-                logger.info(f"Using LLM fallback due to: {trigger_reason.value}")
+                logger.info(f"Using LLM fallback for session {session_id} due to: {trigger_reason.value}")
                 recommendations_response = await self._get_fallback_recommendations(
-                    message, trigger_reason
+                    message, trigger_reason, session_id
                 )
             
             if recommendations_response:
+                # Get potentially updated session_id from backend
+                updated_session_id = recommendations_response.get("session_id", session_id)
+                
                 # Format the response
                 formatted_response = (
                     self.response_formatter.format_recommendations(
@@ -187,36 +190,25 @@ class BeatDebateChatInterface:
                 # Add to history using tuple format
                 history.append((message, formatted_response))
                 
-                # Store in conversation history
-                self.conversation_history.append({
-                    "user_message": message,
-                    "bot_response": formatted_response,
-                    "recommendations": recommendations_response.get(
-                        "recommendations", []
-                    ),
-                    "timestamp": time.time(),
-                    "used_fallback": recommendations_response.get("fallback_used", False)
-                })
-                
                 # Create Last.fm player HTML for latest recommendations
                 lastfm_player_html = self._create_lastfm_player_html(
                     recommendations_response.get("recommendations", [])
                 )
                 
-                return "", history, lastfm_player_html
+                return "", history, lastfm_player_html, updated_session_id
             else:
                 # Final emergency fallback
                 error_response = self._create_emergency_response(message)
                 history.append((message, error_response))
                 
-                return "", history, ""
+                return "", history, "", session_id
                 
         except Exception as e:
-            logger.error(f"Error processing message: {e}")
+            logger.error(f"Error processing message for session {session_id}: {e}")
             error_response = f"An error occurred: {str(e)}"
             history.append((message, error_response))
             
-            return "", history, ""
+            return "", history, "", session_id
     
     def _should_use_fallback(
         self, 
@@ -253,7 +245,8 @@ class BeatDebateChatInterface:
     async def _get_fallback_recommendations(
         self, 
         query: str, 
-        trigger_reason: FallbackTrigger
+        trigger_reason: FallbackTrigger,
+        session_id: str
     ) -> Optional[Dict[str, Any]]:
         """
         Get fallback recommendations from LLM service.
@@ -261,6 +254,7 @@ class BeatDebateChatInterface:
         Args:
             query: User query
             trigger_reason: Reason fallback was triggered
+            session_id: User-specific session identifier
             
         Returns:
             Fallback recommendations response or None if unavailable
@@ -273,7 +267,7 @@ class BeatDebateChatInterface:
             # Prepare fallback request
             fallback_request = FallbackRequest(
                 query=query,
-                session_id=self.session_id,
+                session_id=session_id,
                 chat_context=self._get_chat_context(),
                 trigger_reason=trigger_reason,
                 max_recommendations=10
@@ -301,20 +295,10 @@ class BeatDebateChatInterface:
     
     def _get_chat_context(self) -> Optional[Dict]:
         """Get chat context for fallback requests."""
-        if not self.conversation_history:
-            return None
-        
-        # Get last 3 interactions for context
-        recent_history = self.conversation_history[-3:]
-        return {
-            "previous_queries": [
-                h["user_message"] for h in recent_history
-            ],
-            "previous_recommendations": [
-                h.get("recommendations", [])
-                for h in recent_history
-            ]
-        }
+        # ✅ UPDATED: Chat context now managed entirely by backend session store
+        # The backend will retrieve session history based on session_id
+        # Frontend no longer maintains global conversation history
+        return None
     
     def _create_emergency_response(self, query: str) -> str:
         """Create emergency response when all systems fail."""
@@ -336,7 +320,7 @@ class BeatDebateChatInterface:
                 f"{self.backend_url}/planning",
                 json={
                     "query": query,
-                    "session_id": self.session_id
+                    "session_id": "planning-session"  # Planning doesn't need user session
                 },
                 timeout=60
             )
@@ -353,30 +337,19 @@ class BeatDebateChatInterface:
             logger.error(f"Error getting planning strategy: {e}")
             return None
     
-    async def _get_recommendations(self, query: str) -> Optional[Dict]:
-        """Get recommendations from backend with chat history context."""
+    async def _get_recommendations(self, query: str, session_id: str) -> Optional[Dict]:
+        """Get recommendations from backend with user-specific session context."""
         try:
-            # Prepare request with chat history context
+            # Prepare request with user-specific session ID
             request_data = {
                 "query": query,
-                "session_id": self.session_id,
+                "session_id": session_id,
                 "max_recommendations": 10,
                 "include_previews": True
             }
             
-            # Add chat history context if available
-            if self.conversation_history:
-                # Get last 3 interactions for context
-                recent_history = self.conversation_history[-3:]
-                request_data["chat_context"] = {
-                    "previous_queries": [
-                        h["user_message"] for h in recent_history
-                    ],
-                    "previous_recommendations": [
-                        h.get("recommendations", [])  # Include ALL tracks, not just first
-                        for h in recent_history
-                    ]
-                }
+            # ✅ UPDATED: Chat context now retrieved by backend from session store
+            # No need to pass chat_context explicitly - backend handles it
             
             response = requests.post(
                 f"{self.backend_url}/recommendations",
@@ -386,24 +359,15 @@ class BeatDebateChatInterface:
             
             if response.status_code == 200:
                 response_data = response.json()
-                
-                # 🔧 FIX: Update session ID if backend returns a new one
-                if "session_id" in response_data and response_data["session_id"] != self.session_id:
-                    old_session_id = self.session_id
-                    self.session_id = response_data["session_id"]
-                    logger.info(
-                        f"Session ID updated: {old_session_id} → {self.session_id}"
-                    )
-                
                 return response_data
             else:
                 logger.error(
-                    f"Recommendations request failed: {response.status_code}"
+                    f"Recommendations request failed: {response.status_code} for session {session_id}"
                 )
                 return None
                 
         except Exception as e:
-            logger.error(f"Error getting recommendations: {e}")
+            logger.error(f"Error getting recommendations for session {session_id}: {e}")
             return None
     
     def _create_lastfm_player_html(self, recommendations: List[Dict]) -> str:
@@ -714,6 +678,11 @@ class BeatDebateChatInterface:
             """
         ) as interface:
             
+            # ✅ ADD: Per-user session state management
+            # NOTE: gr.State() without value generates unique session per user
+            import uuid
+            session_id_state = gr.State()
+            
             with gr.Column(elem_classes=["main-container"]):
                 # Header with gradient background
                 with gr.Column(elem_classes=["header-section"]):
@@ -874,9 +843,14 @@ class BeatDebateChatInterface:
                             - **⚖️ Judge**: Ranks & selects best tracks
                             """)
             
-            # Event handlers
-            async def handle_message(message, history):
-                return await self.process_message(message, history)
+            # Event handlers with session state management
+            async def handle_message(message, history, session_id):
+                # Generate session ID if not already set (first interaction)
+                if session_id is None:
+                    session_id = str(uuid.uuid4())
+                    logger.info(f"🆕 Generated new session ID: {session_id}")
+                
+                return await self.process_message(message, history, session_id)
             
             # Example button handlers
             for btn, example_text in example_buttons:
@@ -886,17 +860,17 @@ class BeatDebateChatInterface:
                     outputs=[msg_input]
                 )
             
-            # Submit on button click or enter
+            # Submit on button click or enter with session state
             send_btn.click(
                 fn=handle_message,
-                inputs=[msg_input, chatbot],
-                outputs=[msg_input, chatbot, player_display]
+                inputs=[msg_input, chatbot, session_id_state],
+                outputs=[msg_input, chatbot, player_display, session_id_state]
             )
             
             msg_input.submit(
                 fn=handle_message,
-                inputs=[msg_input, chatbot],
-                outputs=[msg_input, chatbot, player_display]
+                inputs=[msg_input, chatbot, session_id_state],
+                outputs=[msg_input, chatbot, player_display, session_id_state]
             )
         
         return interface

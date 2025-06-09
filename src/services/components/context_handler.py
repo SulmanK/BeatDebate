@@ -132,45 +132,33 @@ class ContextAwareIntentAnalyzer:
 
         Previous query: "{recent_query}"
         Previous artists mentioned: {previous_artists}
-        Original session intent: {original_intent}
-        Artist-focused session: {was_artist_focused}
         Current query: "{query}"
+        Original intent: {original_intent}
+        Was artist-focused: {was_artist_focused}
 
-        🎯 CRITICAL RULES FOR NEW PRIMARY QUERIES:
-        1. If the current query mentions a DIFFERENT artist than previous artists, it is NEVER a follow-up
-        2. Queries like "Music by X", "Songs by X", "Tracks by X" are PRIMARY queries, not follow-ups
-        3. Only treat as follow-up if query explicitly references previous context ("more", "like this", "similar")
+        CRITICAL RULES:
+        1. If query mentions "like [Artist Name]" or "similar to [Artist]", this is NEVER a follow-up - it's a new primary query for that specific artist's style.
+        2. Follow-ups modify existing context (e.g., "more upbeat", "different genre", "more tracks") without introducing NEW primary entities.
+        3. When you detect a similarity query like "Songs like Mk.gee", set target_entity to the mentioned artist ("Mk.gee"), NOT None.
+        4. Only set is_followup=true if the query modifies the CURRENT/RECENT context without naming a different primary artist.
 
-        🎯 FOLLOW-UP DETECTION RULES:
-        1. Generic "more" requests in artist-focused sessions → artist_deep_dive (preserve artist context)
-        2. "More like this" or "similar" → style_continuation
-        3. "More [same artist] tracks" → artist_deep_dive
+        EXAMPLES:
+        ✅ FOLLOW-UP: "Make them more upbeat" (after any query) → is_followup: true, intent should remain same
+        ✅ FOLLOW-UP: "More tracks like this" (after any query) → is_followup: true, target_entity: null
+        ✅ FOLLOW-UP: "Different genre please" (after any query) → is_followup: true, target_entity: null
+        ❌ NOT FOLLOW-UP: "Songs like Mk.gee" (after discussing The Beatles) → is_followup: false, target_entity: "Mk.gee", intent should be artist_similarity
+        ❌ NOT FOLLOW-UP: "Music by Radiohead" (after any query) → is_followup: false, target_entity: "Radiohead", intent should be by_artist
+        ❌ NOT FOLLOW-UP: "Jazz music" (after any query) → is_followup: false, target_entity: null, intent should be genre_mood
 
-        Examples:
-        ✅ FOLLOW-UP: "More tracks" (after "Music by Kendrick Lamar") → artist_deep_dive
-        ✅ FOLLOW-UP: "More like this" → style_continuation  
-        ✅ FOLLOW-UP: "More Kendrick tracks" (same artist) → artist_deep_dive
-        ❌ NOT FOLLOW-UP: "Music by Kendrick Lamar" (new primary query, even if different from previous)
-        ❌ NOT FOLLOW-UP: "Songs by The Beatles" (new primary query)
-        ❌ NOT FOLLOW-UP: "Tracks by Drake" (new primary query)
-
-        🚨 IMPORTANT: If current query is a complete standalone request about a different artist, 
-        it should ALWAYS be is_followup=false, regardless of conversation history!
-
-        Return JSON:
+        Return JSON with:
         {{
-            "is_followup": true/false,
-            "followup_type": "artist_deep_dive" | "style_continuation" | "artist_style_refinement" | "none",
-            "target_entity": "artist name from previous context (only if is_followup=true)",
-            "style_modifier": "style/genre/mood constraint" or null,
-            "confidence": 0.0-1.0,
-            "reasoning": "brief explanation"
+            "is_followup": boolean,
+            "followup_type": "style_continuation" | "artist_deep_dive" | "genre_shift" | "mood_shift" | "preference_refinement" | "none",
+            "target_entity": string or null (IMPORTANT: For "Songs like X" queries, set this to X, not null),
+            "style_modifier": string or null,
+            "confidence": float,
+            "reasoning": string
         }}
-
-        Follow-up types:
-        - "artist_deep_dive": More tracks from SAME artist OR generic "more" in artist-focused session
-        - "style_continuation": More of same style without artist reference in non-artist sessions
-        - "artist_style_refinement": More tracks from SAME artist with style constraint
         """
 
         response = await self.llm_utils.call_llm_with_json_response(
@@ -274,6 +262,15 @@ class ContextAwareIntentAnalyzer:
         # Create entities based on context type
         if target_entity and followup_type == 'artist_deep_dive':
             # For artist deep dive, focus only on the target entity
+            entities = {
+                'artists': [target_entity],
+                'tracks': [],
+                'genres': [],
+                'moods': []
+            }
+        elif target_entity and followup_type in ['style_continuation', 'artist_similarity']:
+            # 🔧 CRITICAL FIX: For similarity queries with explicit target entity (like "Songs like Mk.gee")
+            # Use the target entity as the primary artist, don't fall back to history
             entities = {
                 'artists': [target_entity],
                 'tracks': [],

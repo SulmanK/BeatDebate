@@ -129,10 +129,11 @@ uv run ruff check src/ tests/
 uv run mypy src/
 ```
 
-## 📁 Project Structure
+### Project Structure
 
 The project is organized into distinct layers and components:
 
+```
 beatDebate/
 ├── Design/                  # Design documents and refactoring notes
 ├── scripts/                 # Utility and validation scripts (e.g., validate_lastfm.py)

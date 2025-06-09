@@ -10,6 +10,7 @@ Target: 72KB → ~30KB (60% reduction)
 import asyncio
 from typing import Dict, List, Any, Optional
 from dataclasses import dataclass
+import re  # Add this import for regex pattern matching
 
 import structlog
 import uuid
@@ -483,6 +484,33 @@ class RecommendationService:
             query_lower = request.query.lower().strip()
             is_likely_followup = any(indicator in query_lower for indicator in followup_indicators)
             
+            # Additional check: avoid detecting new artist queries as follow-ups
+            # If query explicitly mentions a different artist than previous, it's NOT a follow-up
+            if not is_likely_followup:
+                # Extract entities from current query to detect new artist mentions
+                current_artists, _ = self._extract_entities_from_query(request.query)
+                last_entities = last_interaction.get('entities', {})
+                last_artists = set()
+                
+                # Get previous artists from last interaction
+                if 'target_artists' in last_entities:
+                    last_artists.update([a.lower().strip() for a in last_entities['target_artists']])
+                if 'target_artist' in last_entities:
+                    last_artists.add(last_entities['target_artist'].lower().strip())
+                
+                # If current query mentions different artists, it's definitely NOT a follow-up
+                if current_artists and last_artists:
+                    artist_overlap = last_artists.intersection(current_artists)
+                    if not artist_overlap:
+                        self.logger.info(
+                            "🎯 Different artist detected - treating as new primary query",
+                            last_artists=list(last_artists),
+                            current_artists=list(current_artists),
+                            query=request.query
+                        )
+                        # Force new session for different artist queries
+                        return True
+            
             if is_likely_followup:
                 self.logger.info(
                     "🔄 Follow-up query detected - preserving session",
@@ -630,8 +658,6 @@ class RecommendationService:
         Returns:
             Tuple of (artists_set, genres_set)
         """
-        import re
-        
         query_lower = query.lower()
         artists = set()
         genres = set()

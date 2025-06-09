@@ -31,9 +31,8 @@ logger = logging.getLogger(__name__)
 QUERY_EXAMPLES = {
     "By Artist": [
         "Music by Mk.gee",
-        "Give me tracks by Radiohead", 
-        "Play some Beatles songs",
-        "Mk.gee songs"
+        "Songs by Michael Jackson that are R&B", 
+        "Play some Beatles songs"
     ],
     "Artist Similarity": [
         "Music like Mk.gee",
@@ -43,7 +42,6 @@ QUERY_EXAMPLES = {
     "Discovery": [
         "Find me underground electronic music",
         "Something completely new and different",
-        "Hidden gems in ambient music",
         "Discover underground tracks by Kendrick Lamar"
     ],
     "Genre/Mood": [
@@ -59,10 +57,7 @@ QUERY_EXAMPLES = {
     "Hybrid": [
         "Music like Kendrick Lamar but jazzy",
         "Chill songs like Bon Iver",
-        "Electronic music similar to Aphex Twin",
-        "Study music like Max Richter",
-        "Find me underground indie rock",
-        "Upbeat indie rock with electronic elements"
+        "Electronic music similar to Aphex Twin"
     ],
     "Follow-ups": [
         "More tracks",
@@ -343,7 +338,7 @@ class BeatDebateChatInterface:
                     "query": query,
                     "session_id": self.session_id
                 },
-                timeout=30
+                timeout=60
             )
             
             if response.status_code == 200:
@@ -386,11 +381,21 @@ class BeatDebateChatInterface:
             response = requests.post(
                 f"{self.backend_url}/recommendations",
                 json=request_data,
-                timeout=60
+                timeout=120
             )
             
             if response.status_code == 200:
-                return response.json()
+                response_data = response.json()
+                
+                # 🔧 FIX: Update session ID if backend returns a new one
+                if "session_id" in response_data and response_data["session_id"] != self.session_id:
+                    old_session_id = self.session_id
+                    self.session_id = response_data["session_id"]
+                    logger.info(
+                        f"Session ID updated: {old_session_id} → {self.session_id}"
+                    )
+                
+                return response_data
             else:
                 logger.error(
                     f"Recommendations request failed: {response.status_code}"

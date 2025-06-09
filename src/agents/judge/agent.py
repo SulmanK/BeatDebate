@@ -1,42 +1,49 @@
 """
-Simplified Judge Agent
+Refactored Judge Agent
 
-Refactored to use dependency injection and shared components, eliminating:
-- LLM calling duplication
-- Ranking logic duplication
-- Explanation generation duplication
-- Quality scoring duplication
+Streamlined judge agent using modular components for better maintainability,
+testability, and adherence to the Single Responsibility Principle.
+
+This refactored version reduces the main agent to orchestration logic while
+delegating specialized responsibilities to focused components.
 """
 
 from typing import Dict, List, Any, Tuple
 import structlog
 
-from ...models.agent_models import MusicRecommenderState, AgentConfig
-from ...models.recommendation_models import TrackRecommendation
-from ...services.api_service import APIService
-from ...services.metadata_service import MetadataService
-from ..base_agent import BaseAgent
-from ..components import QualityScorer
-from .ranking_logic import RankingLogic
-from ..components.query_analysis_utils import QueryAnalysisUtils
+from src.models.agent_models import MusicRecommenderState, AgentConfig
+from src.models.recommendation_models import TrackRecommendation
+from src.services.api_service import APIService
+from src.services.metadata_service import MetadataService
+from src.agents.base_agent import BaseAgent
+from src.agents.components import QualityScorer
+
+# Import the new modular components
+from .components import (
+    RankingEngine,
+    ExplanationGenerator,
+    CandidateSelector,
+    DiversityOptimizer
+)
 
 logger = structlog.get_logger(__name__)
 
 
 class JudgeAgent(BaseAgent):
     """
-    Simplified Judge Agent with dependency injection.
+    Refactored Judge Agent with modular component architecture.
     
     Responsibilities:
-    - Evaluate and rank candidate recommendations from all agents
-    - Apply contextual relevance scoring
-    - Ensure diversity in final selections
-    - Generate conversational explanations
+    - Orchestrate the judge workflow
+    - Coordinate between specialized components
+    - Manage state transitions
+    - Handle error recovery
     
-    Uses shared components to eliminate duplication:
-    - QualityScorer for quality assessment
-    - LLMUtils for LLM interactions and explanation generation
-    - APIService for unified API access
+    Delegates specialized tasks to:
+    - CandidateSelector: Candidate collection and filtering
+    - RankingEngine: Scoring and ranking algorithms
+    - DiversityOptimizer: Diversity optimization
+    - ExplanationGenerator: Explanation generation
     """
     
     def __init__(
@@ -45,10 +52,11 @@ class JudgeAgent(BaseAgent):
         llm_client,
         api_service: APIService,
         metadata_service: MetadataService,
-        rate_limiter=None
+        rate_limiter=None,
+        session_manager=None
     ):
         """
-        Initialize simplified judge agent with injected dependencies.
+        Initialize refactored judge agent with modular components.
         
         Args:
             config: Agent configuration
@@ -56,6 +64,7 @@ class JudgeAgent(BaseAgent):
             api_service: Unified API service
             metadata_service: Unified metadata service
             rate_limiter: Rate limiter for LLM API calls
+            session_manager: SessionManagerService for candidate pool retrieval
         """
         super().__init__(
             config=config, 
@@ -65,29 +74,23 @@ class JudgeAgent(BaseAgent):
             rate_limiter=rate_limiter
         )
         
-        # Shared components initialized in parent with rate limiter
+        # Initialize modular components
+        self.candidate_selector = CandidateSelector(session_manager=session_manager)
+        self.ranking_engine = RankingEngine()
+        self.diversity_optimizer = DiversityOptimizer()
+        self.explanation_generator = ExplanationGenerator(self.llm_utils)
+        
+        # Shared components from parent
         self.quality_scorer = QualityScorer()
         
-        # Configuration
-        self.final_recommendations = 25
-        self.diversity_targets = {
-            'max_per_artist': 2,
-            'min_genres': 3,
-            'source_distribution': {
-                'genre_mood_agent': 0.4, 
-                'discovery_agent': 0.4, 
-                'planner_agent': 0.2
-            }
-        }
+        # Configuration (will be updated based on intent)
+        self.final_recommendations = 20  # Default fallback
         
-        # Initialize shared components
-        self.ranking_logic = RankingLogic()
-        
-        self.logger.info("Simplified JudgeAgent initialized with dependency injection")
+        self.logger.info("JudgeAgentRefactored initialized with modular components")
     
     async def process(self, state: MusicRecommenderState) -> MusicRecommenderState:
         """
-        Evaluate and select final recommendations from all agent candidates.
+        Main processing workflow using modular components.
         
         Args:
             state: Current workflow state with candidate recommendations
@@ -96,843 +99,331 @@ class JudgeAgent(BaseAgent):
             Updated state with final ranked recommendations
         """
         try:
-            self.logger.info("Starting judge agent processing")
+            self.logger.info("Starting refactored judge agent processing")
             
-            # Collect all candidate recommendations
-            all_candidates = self._collect_all_candidates(state)
-            
-            self.logger.debug(f"Collected {len(all_candidates)} total candidates")
-            
-            # 🔧 DEBUG: Check if recently_shown_track_ids is populated
-            self.logger.info(
-                f"🔍 JUDGE DEBUG: recently_shown_track_ids = {getattr(state, 'recently_shown_track_ids', 'NOT_SET')}"
-            )
-            self.logger.info(
-                f"🔍 JUDGE DEBUG: recently_shown_track_ids type = {type(getattr(state, 'recently_shown_track_ids', None))}"
-            )
-            
-            if not all_candidates:
-                self.logger.warning("No candidates found for evaluation")
+            # Phase 1: Candidate Collection and Filtering
+            candidates = await self._collect_and_filter_candidates(state)
+            if not candidates:
+                self.logger.warning("No candidates available for evaluation")
                 state.final_recommendations = []
                 return state
             
-            # 🔧 NEW: Filter out recently shown tracks for follow-up queries
-            if state.recently_shown_track_ids:
-                original_count = len(all_candidates)
-                all_candidates = self._filter_out_recently_shown(all_candidates, state)
-                filtered_count = len(all_candidates)
-                
-                self.logger.info(
-                    f"🚫 DUPLICATE FILTER: Filtered out {original_count - filtered_count} "
-                    f"previously shown tracks (kept {filtered_count})"
-                )
-                
-                if not all_candidates:
-                    self.logger.warning("All candidates were filtered as duplicates")
-                    state.final_recommendations = []
-                    return state
-            else:
-                self.logger.info("🔍 JUDGE DEBUG: No recently shown tracks to filter, skipping duplicate filtering")
+            # Phase 2: Scoring and Ranking
+            scored_candidates = await self._score_and_rank_candidates(candidates, state)
+            if not scored_candidates:
+                self.logger.warning("No candidates survived scoring")
+                state.final_recommendations = []
+                return state
             
-            # Phase 1: Score all candidates with contextual relevance
-            scored_candidates = await self._score_all_candidates(all_candidates, state)
+            # Phase 3: Diversity Optimization
+            diverse_selections = self._apply_diversity_optimization(scored_candidates, state)
+            if not diverse_selections:
+                self.logger.warning("Diversity optimization failed")
+                # Fallback to top scored candidates
+                diverse_selections = [track for track, _ in scored_candidates[:self.final_recommendations]]
             
-            # Phase 2: Apply ranking based on user intent and context
-            ranked_candidates = await self._rank_candidates(scored_candidates, state)
+            # Phase 4: Explanation Generation
+            explained_selections = await self._generate_explanations(diverse_selections, state)
             
-            # Phase 3: Select final recommendations with diversity
-            final_selections = self._select_with_diversity(ranked_candidates, state)
-            
-            # Phase 4: Generate enhanced explanations
-            final_recommendations = await self._generate_explanations(final_selections, state)
-            
-            # CRITICAL: Ensure proper state update for LangGraph
-            # Convert to dict format for state storage
-            final_recommendations_dicts = [rec.model_dump() for rec in final_recommendations]
-            
-            # Create a new state object to ensure proper propagation
-            updated_state = MusicRecommenderState(
-                # Copy all existing fields
-                user_query=state.user_query,
-                session_id=state.session_id,
-                max_recommendations=state.max_recommendations,
-                planning_strategy=state.planning_strategy,
-                execution_plan=state.execution_plan,
-                coordination_strategy=state.coordination_strategy,
-                agent_coordination=state.agent_coordination,
-                entities=state.entities,
-                intent_analysis=state.intent_analysis,
-                query_understanding=state.query_understanding,
-                conversation_context=state.conversation_context,
-                entity_reasoning=state.entity_reasoning,
-                context_decision=state.context_decision,
-                genre_mood_recommendations=state.genre_mood_recommendations,
-                discovery_recommendations=state.discovery_recommendations,
-                reasoning_log=state.reasoning_log,
-                agent_deliberations=state.agent_deliberations,
-                error_info=state.error_info,
-                processing_start_time=state.processing_start_time,
-                total_processing_time=state.total_processing_time,
-                confidence=state.confidence,
-                # Set the critical final_recommendations field
-                final_recommendations=final_recommendations_dicts
+            # Update state with final results
+            state.final_recommendations = explained_selections
+            state.judge_metadata = self._create_judge_metadata(
+                candidates, scored_candidates, diverse_selections, explained_selections
             )
             
             self.logger.info(
-                "Judge agent processing completed",
-                total_candidates=len(all_candidates),
-                final_recommendations=len(final_recommendations)
+                "Judge processing completed successfully",
+                input_candidates=len(candidates),
+                scored_candidates=len(scored_candidates),
+                final_recommendations=len(explained_selections)
             )
             
-            # Verify the field is set
-            self.logger.debug(f"Returning state with final_recommendations: {len(updated_state.final_recommendations)}")
-            
-            return updated_state
+            return state
             
         except Exception as e:
-            self.logger.error("Judge agent processing failed", error=str(e))
-            state.final_recommendations = []
+            self.logger.error(f"Judge agent processing failed: {e}")
+            # Provide fallback recommendations if possible
+            state.final_recommendations = self._create_fallback_recommendations(state)
             return state
     
-    def _collect_all_candidates(self, state: MusicRecommenderState) -> List[TrackRecommendation]:
-        """Collect all candidate recommendations from different agents."""
-        all_candidates = []
-        
-        # Collect from genre/mood agent
-        if state.genre_mood_recommendations:
-            for rec_dict in state.genre_mood_recommendations:
-                try:
-                    rec = TrackRecommendation(**rec_dict)
-                    all_candidates.append(rec)
-                except Exception as e:
-                    self.logger.warning(f"Failed to parse genre/mood recommendation: {e}")
-        
-        # Collect from discovery agent
-        if state.discovery_recommendations:
-            for rec_dict in state.discovery_recommendations:
-                try:
-                    rec = TrackRecommendation(**rec_dict)
-                    all_candidates.append(rec)
-                except Exception as e:
-                    self.logger.warning(f"Failed to parse discovery recommendation: {e}")
-        
-        # Remove duplicates based on artist + name
-        unique_candidates = []
-        seen_tracks = set()
-        
-        for candidate in all_candidates:
-            track_key = f"{candidate.artist.lower()}::{candidate.title.lower()}"
-            if track_key not in seen_tracks:
-                seen_tracks.add(track_key)
-                unique_candidates.append(candidate)
-        
-        return unique_candidates
+    async def _collect_and_filter_candidates(
+        self, 
+        state: MusicRecommenderState
+    ) -> List[TrackRecommendation]:
+        """Phase 1: Collect and filter candidates using CandidateSelector."""
+        try:
+            candidates = await self.candidate_selector.collect_and_filter_candidates(state)
+            
+            # Validate candidates
+            valid_candidates, validation_errors = self.candidate_selector.validate_candidates(candidates)
+            
+            if validation_errors:
+                self.logger.warning(f"Candidate validation found {len(validation_errors)} issues")
+            
+            # Log candidate statistics
+            stats = self.candidate_selector.get_candidate_statistics(valid_candidates)
+            self.logger.info("Candidate collection completed", **stats)
+            
+            return valid_candidates
+            
+        except Exception as e:
+            self.logger.error(f"Candidate collection failed: {e}")
+            return []
     
-    async def _score_all_candidates(
+    async def _score_and_rank_candidates(
         self,
         candidates: List[TrackRecommendation],
         state: MusicRecommenderState
     ) -> List[Tuple[TrackRecommendation, Dict[str, float]]]:
-        """Score all candidates with contextual relevance."""
-        scored_candidates = []
-        
-        # Collect context from state
-        entities = state.entities or {}
-        intent_analysis = state.intent_analysis or {}
-        
-        # 🔧 FIX: Get intent from state and detect hybrid sub-types
-        intent = 'balanced'  # default
-        if state and state.query_understanding and hasattr(state.query_understanding, 'intent'):
-            # Get intent from QueryUnderstanding object
-            intent_value = state.query_understanding.intent
-            if hasattr(intent_value, 'value'):
-                intent = intent_value.value
-            else:
-                intent = str(intent_value)
-            self.logger.debug(f"🔧 Intent from query_understanding: {intent}")
-            
-            # 🔧 NEW: Detect hybrid sub-types for dynamic scoring
-            if intent == 'hybrid':
-                hybrid_subtype = self._detect_hybrid_subtype(state)
-                intent = hybrid_subtype
-                self.logger.info(f"🔧 Using hybrid sub-type for scoring: {intent}")
-        
-        elif state and state.intent_analysis and 'intent' in state.intent_analysis:
-            intent = state.intent_analysis['intent']
-            self.logger.debug(f"🔧 Intent from intent_analysis: {intent}")
-        else:
-            self.logger.warning("🔧 No intent found, using default: balanced")
-        
-        for candidate in candidates:
-            try:
-                # Calculate multiple scoring dimensions
-                scores = {
-                    'quality_score': await self._calculate_quality_score(candidate, entities, intent_analysis),
-                    'contextual_relevance': self._calculate_contextual_relevance(candidate, entities, intent_analysis),
-                    'intent_alignment': self._calculate_intent_alignment(candidate, intent_analysis, entities, intent),
-                    'source_priority': self._calculate_source_priority(candidate),
-                    'diversity_value': self._calculate_diversity_value(candidate, entities)
-                }
-                
-                # Calculate combined score
-                scores['combined_score'] = (
-                    scores['quality_score'] * 0.25 +
-                    scores['contextual_relevance'] * 0.25 +
-                    scores['intent_alignment'] * 0.25 +
-                    scores['source_priority'] * 0.15 +
-                    scores['diversity_value'] * 0.10
-                )
-                
-                scored_candidates.append((candidate, scores))
-                
-            except Exception as e:
-                self.logger.warning(f"Failed to score candidate {candidate.title}: {e}")
-                continue
-        
-        return scored_candidates
-    
-    async def _calculate_quality_score(
-        self,
-        candidate: TrackRecommendation,
-        entities: Dict[str, Any],
-        intent_analysis: Dict[str, Any]
-    ) -> float:
-        """Calculate quality score using shared quality scorer."""
+        """Phase 2: Score and rank candidates using RankingEngine."""
         try:
-            # Convert TrackRecommendation to dict for quality scorer
-            candidate_dict = {
-                'name': candidate.title,
-                'artist': candidate.artist,
-                'album': candidate.album_title,
-                'tags': candidate.moods,
-                'url': candidate.track_url,
-                'listeners': getattr(candidate, 'listeners', 0),
-                'playcount': getattr(candidate, 'playcount', 0)
-            }
+            # First, calculate additional scores for all candidates
+            scored_candidates = []
             
-            return await self.quality_scorer.calculate_quality_score(
-                candidate_dict, entities, intent_analysis
+            for candidate in candidates:
+                try:
+                    # Calculate contextual relevance
+                    contextual_score = self.ranking_engine.calculate_contextual_relevance(
+                        candidate, 
+                        getattr(state, 'entities', {}),
+                        getattr(state, 'intent_analysis', {})
+                    )
+                    
+                    # Start with existing agent scores or defaults
+                    agent_scores = getattr(candidate, '_scores', {})
+                    if not agent_scores:
+                        agent_scores = {
+                            'quality': 0.5,
+                            'novelty': 0.5,
+                            'source_priority': 0.5
+                        }
+                    
+                    # Add contextual relevance
+                    agent_scores['contextual_relevance'] = contextual_score
+                    
+                    scored_candidates.append((candidate, agent_scores))
+                    
+                except Exception as e:
+                    self.logger.warning(f"Individual candidate scoring failed: {e}")
+                    # Use fallback scores
+                    fallback_scores = {
+                        'quality': 0.5,
+                        'contextual_relevance': 0.3,
+                        'novelty': 0.5,
+                        'source_priority': 0.5
+                    }
+                    scored_candidates.append((candidate, fallback_scores))
+            
+            # Now rank all candidates
+            ranked_candidates = await self.ranking_engine.rank_candidates(
+                scored_candidates, state
             )
             
+            self.logger.info(f"Scoring and ranking completed: {len(ranked_candidates)} candidates")
+            return ranked_candidates
+            
         except Exception as e:
-            self.logger.debug(f"Quality scoring failed for {candidate.title}: {e}")
-            return 0.5  # Default score
+            self.logger.error(f"Scoring and ranking failed: {e}")
+            return []
     
-    def _calculate_contextual_relevance(
-        self,
-        candidate: TrackRecommendation,
-        entities: Dict[str, Any],
-        intent_analysis: Dict[str, Any]
-    ) -> float:
-        """Calculate contextual relevance score."""
-        score = 0.0
-        
-        # Genre relevance
-        target_genres = self._extract_target_genres(entities)
-        candidate_genres = [genre.lower() for genre in candidate.genres]
-        
-        for target_genre in target_genres:
-            if any(target_genre.lower() in genre for genre in candidate_genres):
-                score += 0.3
-        
-        # Mood relevance
-        target_moods = self._extract_target_moods(entities, intent_analysis)
-        candidate_tags = [tag.lower() for tag in candidate.moods]
-        
-        for target_mood in target_moods:
-            if any(target_mood.lower() in tag for tag in candidate_tags):
-                score += 0.2
-        
-        # Activity context relevance
-        context_factors = entities.get('context_factors', [])
-        for context in context_factors:
-            if any(context.lower() in tag for tag in candidate_tags):
-                score += 0.2
-        
-        return min(score, 1.0)
-    
-    def _calculate_intent_alignment(
-        self,
-        candidate: TrackRecommendation,
-        intent_analysis: Dict[str, Any],
-        entities: Dict[str, Any],
-        intent: str
-    ) -> float:
-        """Calculate alignment with user intent."""
-        # 🔧 DEBUG: Log intent detection for troubleshooting
-        if candidate.artist == 'Mk.gee':
-            self.logger.info(f"🔍 DEBUG Judge: Candidate '{candidate.title}' by {candidate.artist}")
-            self.logger.info(f"🔍 DEBUG Judge: Primary intent detected: '{intent}'")
-            self.logger.info(f"🔍 DEBUG Judge: Intent analysis keys: {list(intent_analysis.keys())}")
-        
-        # Intent-specific scoring
-        if intent == 'discovery':
-            # Favor tracks with novelty indicators
-            if candidate.source == 'discovery_agent':
-                return 0.8
-            elif 'underground' in candidate.moods or 'hidden_gem' in candidate.moods:
-                return 0.7
-            else:
-                return 0.5
-        
-        elif intent == 'genre_mood':
-            # Favor tracks from genre/mood agent
-            if candidate.source == 'genre_mood_agent':
-                return 0.8
-            else:
-                return 0.6
-        
-        elif intent in ['similarity', 'artist_similarity']:
-            # ✅ FIXED! Handle both similarity and artist_similarity intents
-            # For artist similarity queries, prioritize tracks from the target artist
-            if intent == 'artist_similarity':
-                # Get target artists from entities (not intent_analysis)
-                target_artists = self._extract_target_artists_from_entities(entities)
-                
-                # 🔧 DEBUG: Log target artist extraction for troubleshooting
-                if candidate.artist == 'Mk.gee':
-                    self.logger.info(f"🔍 DEBUG Judge: Target artists extracted: {target_artists}")
-                    self.logger.info(f"🔍 DEBUG Judge: Candidate artist '{candidate.artist}' in target_artists: {candidate.artist in target_artists}")
-                
-                if target_artists and candidate.artist in target_artists:
-                    if candidate.artist == 'Mk.gee':
-                        self.logger.info(f"🎯 DEBUG Judge: Giving 0.95 intent alignment to Mk.gee track: {candidate.title}!")
-                    return 0.95  # Very high score for target artist tracks
-                elif (hasattr(candidate, 'explanation') and candidate.explanation 
-                      and 'similar' in candidate.explanation.lower()):
-                    return 0.8   # High score for similar tracks
-                else:
-                    return 0.6   # Medium score for other tracks
-            else:
-                # General similarity
-                if (hasattr(candidate, 'explanation') and candidate.explanation 
-                    and 'similar' in candidate.explanation.lower()):
-                    return 0.8
-                else:
-                    return 0.6
-        
-        return 0.5  # Default alignment
-    
-    def _calculate_source_priority(self, candidate: TrackRecommendation) -> float:
-        """Calculate source priority score."""
-        source_priorities = {
-            'genre_mood_agent': 0.8,
-            'discovery_agent': 0.7,
-            'planner_agent': 0.6,
-            'unified_candidate_generator': 0.5
-        }
-        
-        return source_priorities.get(candidate.source, 0.5)
-    
-    def _calculate_diversity_value(
-        self,
-        candidate: TrackRecommendation,
-        entities: Dict[str, Any]
-    ) -> float:
-        """Calculate diversity value for the candidate."""
-        score = 0.5  # Base diversity score
-        
-        # Unique genre bonus
-        candidate_genres = set(genre.lower() for genre in candidate.genres)
-        target_genres = set(genre.lower() for genre in self._extract_target_genres(entities))
-        
-        if candidate_genres - target_genres:  # Has genres not in target
-            score += 0.3
-        
-        # Unique tags bonus
-        unique_tags = ['experimental', 'underground', 'rare', 'hidden_gem', 'cult']
-        if any(tag in candidate.moods for tag in unique_tags):
-            score += 0.2
-        
-        return min(score, 1.0)
-    
-    async def _rank_candidates(
+    def _apply_diversity_optimization(
         self,
         scored_candidates: List[Tuple[TrackRecommendation, Dict[str, float]]],
         state: MusicRecommenderState
-    ) -> List[Tuple[TrackRecommendation, Dict[str, float]]]:
-        """Rank candidates using intent-aware scoring."""
-        # Get user intent for scoring weights
-        intent = state.query_understanding.intent.value if state.query_understanding else 'balanced'
-        
-        # 🔧 NEW: Detect hybrid sub-types for dynamic scoring
-        if intent == 'hybrid':
-            hybrid_subtype = self._detect_hybrid_subtype(state)
-            intent = hybrid_subtype
-            self.logger.info(f"🔧 Using hybrid sub-type for ranking: {intent}")
-        
-        # 🔧 Use RankingLogic with intent-specific parameters
-        ranking_logic = RankingLogic()
-        
-        # Get intent-specific scoring weights
-        scoring_weights = ranking_logic.get_intent_weights(intent)
-        self.logger.info(f"🔧 Using scoring weights for intent '{intent}': {scoring_weights}")
-        
-        # Rank candidates using intent-aware logic with dynamic novelty threshold detection
-        ranked_candidates = ranking_logic.rank_recommendations(
-            candidates=scored_candidates, 
-            intent=intent,
-            entities=state.entities,
-            intent_analysis=state.intent_analysis,
-            scoring_weights=scoring_weights
-        )
-        
-        self.logger.debug(f"Ranked {len(ranked_candidates)} candidates using intent: {intent}")
-        return ranked_candidates
-    
-    def _select_with_diversity(
-        self,
-        ranked_candidates: List[Tuple[TrackRecommendation, Dict[str, float]]],
-        state: MusicRecommenderState = None
     ) -> List[TrackRecommendation]:
-        """Select final recommendations ensuring diversity."""
-        selected = []
-        artist_counts = {}
-        genre_counts = {}
-        source_counts = {}
-        
-        # 🔧 FIX: Get intent-specific diversity limits instead of hardcoded ones
-        intent = 'balanced'  # default
-        if state and state.query_understanding and hasattr(state.query_understanding, 'intent'):
-            # Get intent from QueryUnderstanding object
-            intent_value = state.query_understanding.intent
-            if hasattr(intent_value, 'value'):
-                intent = intent_value.value
-            else:
-                intent = str(intent_value)
-            self.logger.debug(f"🔧 Intent from query_understanding: {intent}")
-        elif state and state.intent_analysis and 'intent' in state.intent_analysis:
-            intent = state.intent_analysis['intent']
-            self.logger.debug(f"🔧 Intent from intent_analysis: {intent}")
-        
-        # 🚀 NEW: Apply context override constraints for followup intents
-        max_per_artist = 2  # default
-        context_override_applied = False
-        
-        if state and hasattr(state, 'context_override') and state.context_override:
-            context_override = state.context_override
+        """Phase 3: Apply diversity optimization using DiversityOptimizer."""
+        try:
+            # Get intent-specific final recommendations count
+            target_count = self._get_target_recommendations_count(state)
             
-            self.logger.info(f"🔧 DEBUG: Judge Agent received context_override: {type(context_override)}")
-            
-            # Handle both dictionary and object formats
-            is_followup = False
-            constraint_overrides = None
-            intent_override = None
-            target_entity = None
-            
-            if isinstance(context_override, dict):
-                is_followup = context_override.get('is_followup', False)
-                constraint_overrides = context_override.get('constraint_overrides')
-                intent_override = context_override.get('intent_override')
-                target_entity = context_override.get('target_entity')
-            elif hasattr(context_override, 'is_followup'):
-                is_followup = context_override.is_followup
-                constraint_overrides = getattr(context_override, 'constraint_overrides', None)
-                intent_override = getattr(context_override, 'intent_override', None)
-                target_entity = getattr(context_override, 'target_entity', None)
-            
-            if is_followup and constraint_overrides:
-                # Apply context-specific constraints
-                target_artist = constraint_overrides.get('target_artist') if isinstance(constraint_overrides, dict) else None
-                
-                self.logger.info(
-                    "🚀 Context override detected",
-                    intent_override=intent_override,
-                    target_entity=target_entity,
-                    target_artist=target_artist
-                )
-                
-                if intent_override in ['artist_deep_dive', 'artist_similarity'] and target_entity:
-                    # For artist-focused followup queries, allow many more tracks from target artist
-                    max_per_artist = constraint_overrides.get('max_per_artist', 10) if isinstance(constraint_overrides, dict) else 10
-                    context_override_applied = True
-                    
-                    self.logger.info(
-                        f"🎯 Artist followup query: allowing up to {max_per_artist} tracks from {target_entity}"
-                    )
-                elif intent_override == 'artist_style_refinement' and target_entity:
-                    # 🔧 NEW: Artist-style refinement handling
-                    # Allow more tracks from target artist, but less than pure artist similarity
-                    max_per_artist = 8  # Slightly less than pure artist similarity
-                    context_override_applied = True
-                    
-                    # Get style modifier for logging
-                    style_modifier = None
-                    if isinstance(context_override, dict):
-                        style_modifier = context_override.get('style_modifier')
-                    elif hasattr(context_override, 'style_modifier'):
-                        style_modifier = getattr(context_override, 'style_modifier', None)
-                    
-                    self.logger.info(
-                        f"🎵 Artist-style refinement: allowing up to {max_per_artist} tracks "
-                        f"from {target_entity} with style '{style_modifier}'"
-                    )
-                elif intent_override == 'style_continuation':
-                    # For style continuation, moderate increase
-                    max_per_artist = constraint_overrides.get('max_per_artist', 3) if isinstance(constraint_overrides, dict) else 3
-                    context_override_applied = True
-                    
-                    self.logger.info(
-                        f"🎵 Style continuation: allowing up to {max_per_artist} tracks per artist"
-                    )
-            else:
-                self.logger.info(f"🔧 DEBUG: No context override applied - is_followup={is_followup}, has_constraints={bool(constraint_overrides)}")
-        
-        # Apply appropriate diversity limits
-        if not context_override_applied:
-            diversity_limits = self.ranking_logic.get_diversity_limits(intent)
-            max_per_artist = diversity_limits.get('max_per_artist', 2)
-        
-        # 🎯 NEW: Check if this is a genre-specific query requiring different logic
-        is_genre_specific_query = False
-        if state and state.entities:
-            entities = state.entities
-            intent_analysis = state.intent_analysis or {}
-            
-            # Check if this is a hybrid query with specific genre requirements
-            musical_entities = entities.get('musical_entities', {})
-            genres_primary = musical_entities.get('genres', {}).get('primary')
-            is_hybrid = (intent_analysis.get('intent') == 'hybrid' or 
-                        intent_analysis.get('primary_intent') == 'hybrid')
-            
-            is_genre_specific_query = bool(genres_primary and is_hybrid)
-            
-            if is_genre_specific_query:
-                self.logger.info(f"🎯 Genre-specific query detected: prioritizing genre_mood_agent tracks for genres {genres_primary}")
-        
-        self.logger.debug(f"🔧 DEBUG: Intent: {intent}, max tracks per artist: {max_per_artist}")
-        self.logger.debug(f"Starting diversity selection with {len(ranked_candidates)} candidates")
-        
-        for i, (candidate, scores) in enumerate(ranked_candidates):
-            self.logger.debug(
-                f"Evaluating candidate {i+1}: {candidate.title} by {candidate.artist}, "
-                f"source={candidate.source}, score={scores.get('final_score', 0):.3f}"
+            diverse_selections = self.diversity_optimizer.select_with_diversity(
+                scored_candidates, state, target_count
             )
             
-            # Check artist diversity using context-aware limits
-            if artist_counts.get(candidate.artist, 0) >= max_per_artist:
-                self.logger.debug(f"Skipping {candidate.title}: too many tracks from {candidate.artist}")
-                continue
+            # Calculate diversity metrics
+            diversity_metrics = self.diversity_optimizer.calculate_diversity_score(diverse_selections)
+            self.logger.info("Diversity optimization completed", target_count=target_count, **diversity_metrics)
             
-            # 🎯 MODIFIED: Genre-aware source distribution
-            source_count = source_counts.get(candidate.source, 0)
+            return diverse_selections
             
-            if is_genre_specific_query:
-                # For genre-specific queries, relax source constraints for genre_mood_agent
-                if candidate.source == 'genre_mood_agent':
-                    # Allow more genre_mood_agent tracks (up to 80% of recommendations)
-                    max_per_source = int(self.final_recommendations * 0.8)
-                else:
-                    # Restrict other sources more (discovery, planner) 
-                    max_per_source = int(self.final_recommendations * 0.2)
-            else:
-                # Standard source distribution for non-genre queries
-                max_per_source = int(self.final_recommendations * 
-                                     self.diversity_targets['source_distribution'].get(candidate.source, 0.3))
-            
-            self.logger.debug(
-                f"Source check: {candidate.source} count={source_count}, max={max_per_source}"
-            )
-            
-            if source_count >= max_per_source:
-                self.logger.debug(f"Skipping {candidate.title}: source quota exceeded for {candidate.source}")
-                continue
-            
-            # Add to selection
-            selected.append(candidate)
-            artist_counts[candidate.artist] = artist_counts.get(candidate.artist, 0) + 1
-            source_counts[candidate.source] = source_counts.get(candidate.source, 0) + 1
-            
-            # Update genre counts
-            for genre in candidate.genres:
-                genre_counts[genre] = genre_counts.get(genre, 0) + 1
-            
-            self.logger.debug(f"Selected {candidate.title} (total selected: {len(selected)})")
-            
-            # Stop when we have enough
-            if len(selected) >= self.final_recommendations:
-                break
-        
-        self.logger.info(
-            f"🔧 DEBUG: Diversity filtering: {len(ranked_candidates)} -> {len(selected)} candidates"
-        )
-        
-        if context_override_applied:
-            self.logger.info(
-                f"🚀 Context override applied - final artist distribution: {dict(artist_counts)}"
-            )
-        
-        self.logger.info(
-            f"Selected {len(selected)} recommendations with diversity",
-            artist_distribution=dict(artist_counts),
-            source_distribution=dict(source_counts),
-            diversity_targets=self.diversity_targets
-        )
-        
-        return selected
+        except Exception as e:
+            self.logger.error(f"Diversity optimization failed: {e}")
+            return []
     
     async def _generate_explanations(
         self,
         selections: List[TrackRecommendation],
         state: MusicRecommenderState
     ) -> List[TrackRecommendation]:
-        """Generate enhanced explanations for final selections."""
-        enhanced_selections = []
-        
-        # For now, skip individual LLM calls to avoid rate limits
-        # Use existing explanations or create simple ones
-        for i, recommendation in enumerate(selections):
-            try:
-                # Use existing explanation or create a simple one
-                if not recommendation.explanation or len(recommendation.explanation.strip()) < 10:
-                    recommendation.explanation = self._create_fallback_reasoning(
-                        recommendation, 
-                        state.entities or {}, 
-                        state.intent_analysis or {}, 
-                        i + 1
-                    )
-                
-                recommendation.rank = i + 1
-                enhanced_selections.append(recommendation)
-                
-            except Exception as e:
-                self.logger.warning(f"Failed to enhance reasoning for {recommendation.title}: {e}")
-                # Use original recommendation with updated rank
-                recommendation.rank = i + 1
-                enhanced_selections.append(recommendation)
-        
-        return enhanced_selections
-    
-    def _create_fallback_reasoning(
-        self,
-        recommendation: TrackRecommendation,
-        entities: Dict[str, Any],
-        intent_analysis: Dict[str, Any],
-        rank: int
-    ) -> str:
-        """Create fallback reasoning when LLM is unavailable."""
-        reasoning_parts = [f"#{rank}: {recommendation.title} by {recommendation.artist}"]
-        
-        # Add genre information
-        if recommendation.genres:
-            reasoning_parts.append(f"A great {'/'.join(recommendation.genres[:2])} track")
-        
-        # Add source information
-        if recommendation.source == 'discovery_agent':
-            reasoning_parts.append("Perfect for discovery")
-        elif recommendation.source == 'genre_mood_agent':
-            reasoning_parts.append("Matches your genre and mood preferences")
-        
-        # Add confidence information
-        if recommendation.confidence > 0.8:
-            reasoning_parts.append("High confidence match")
-        elif recommendation.confidence > 0.6:
-            reasoning_parts.append("Good match for your request")
-        
-        return ". ".join(reasoning_parts) + "."
-    
-    def _extract_target_genres(self, entities: Dict[str, Any]) -> List[str]:
-        """Extract target genres from entities."""
-        musical_entities = entities.get('musical_entities', {})
-        genres = musical_entities.get('genres', {})
-        
-        target_genres = []
-        target_genres.extend(genres.get('primary', []))
-        target_genres.extend(genres.get('secondary', []))
-        
-        return list(set(target_genres))  # Remove duplicates
-    
-    def _extract_target_moods(self, entities: Dict[str, Any], intent_analysis: Dict[str, Any]) -> List[str]:
-        """Extract target moods from entities and intent analysis."""
-        moods = []
-        
-        # From entities
-        contextual_entities = entities.get('contextual_entities', {})
-        mood_entities = contextual_entities.get('moods', {})
-        moods.extend(mood_entities.get('energy', []))
-        moods.extend(mood_entities.get('emotion', []))
-        
-        # From intent analysis
-        moods.extend(intent_analysis.get('mood_indicators', []))
-        
-        return list(set(moods))  # Remove duplicates
-    
-    def _extract_target_artists_from_entities(self, entities: Dict[str, Any]) -> List[str]:
-        """Extract target artists from entities for artist similarity queries."""
-        musical_entities = entities.get('musical_entities', {})
-        artists = musical_entities.get('artists', {})
-        
-        target_artists = []
-        target_artists.extend(artists.get('primary', []))
-        target_artists.extend(artists.get('similar_to', []))
-        
-        return list(set(target_artists))  # Remove duplicates
-    
-    async def evaluate_and_select(self, state: MusicRecommenderState) -> MusicRecommenderState:
-        """
-        Evaluate and select final recommendations (alias for process method).
-        
-        This method provides backward compatibility with the enhanced recommendation service.
-        
-        Args:
-            state: Current workflow state with candidate recommendations
+        """Phase 4: Generate explanations using ExplanationGenerator."""
+        try:
+            explained_selections = await self.explanation_generator.generate_explanations(
+                selections, state
+            )
             
-        Returns:
-            Updated state with final ranked recommendations
-        """
-        return await self.process(state) 
+            self.logger.info(f"Explanation generation completed for {len(explained_selections)} tracks")
+            return explained_selections
+            
+        except Exception as e:
+            self.logger.error(f"Explanation generation failed: {e}")
+            # Return selections with basic explanations
+            for i, selection in enumerate(selections, 1):
+                if not hasattr(selection, 'explanation') or not selection.explanation:
+                    selection.explanation = f"Great track #{i} that matches your musical preferences!"
+            return selections
+    
+    def _create_judge_metadata(
+        self,
+        candidates: List[TrackRecommendation],
+        scored_candidates: List[Tuple[TrackRecommendation, Dict[str, float]]],
+        diverse_selections: List[TrackRecommendation],
+        final_selections: List[TrackRecommendation]
+    ) -> Dict[str, Any]:
+        """Create metadata about the judge's decision process."""
+        try:
+            # Calculate selection statistics
+            candidate_stats = self.candidate_selector.get_candidate_statistics(candidates)
+            diversity_metrics = self.diversity_optimizer.calculate_diversity_score(diverse_selections)
+            
+            # Calculate score statistics
+            if scored_candidates:
+                scores = [scores.get('final_score', 0.5) for _, scores in scored_candidates]
+                score_stats = {
+                    'mean_score': sum(scores) / len(scores),
+                    'max_score': max(scores),
+                    'min_score': min(scores),
+                    'score_range': max(scores) - min(scores)
+                }
+            else:
+                score_stats = {}
+            
+            return {
+                'processing_summary': {
+                    'input_candidates': len(candidates),
+                    'scored_candidates': len(scored_candidates),
+                    'diverse_selections': len(diverse_selections),
+                    'final_selections': len(final_selections)
+                },
+                'candidate_statistics': candidate_stats,
+                'diversity_metrics': diversity_metrics,
+                'score_statistics': score_stats,
+                'processing_timestamp': self._get_timestamp()
+            }
+            
+        except Exception as e:
+            self.logger.warning(f"Judge metadata creation failed: {e}")
+            return {
+                'processing_summary': {
+                    'final_selections': len(final_selections)
+                },
+                'error': str(e)
+            }
+    
+    def _create_fallback_recommendations(
+        self, 
+        state: MusicRecommenderState
+    ) -> List[TrackRecommendation]:
+        """Create fallback recommendations when main processing fails."""
+        try:
+            # Try to get any available candidates from state
+            fallback_candidates = []
+            
+            # Collect from genre_mood_agent
+            if hasattr(state, 'genre_mood_recommendations') and state.genre_mood_recommendations:
+                fallback_candidates.extend(state.genre_mood_recommendations[:10])
+            
+            # Collect from discovery_agent
+            if hasattr(state, 'discovery_recommendations') and state.discovery_recommendations:
+                fallback_candidates.extend(state.discovery_recommendations[:10])
+            
+            # Add basic reasoning
+            for i, candidate in enumerate(fallback_candidates[:self.final_recommendations], 1):
+                if not hasattr(candidate, 'explanation') or not candidate.explanation:
+                    candidate.explanation = f"Recommendation #{i} from our music discovery system."
+            
+            self.logger.info(f"Created {len(fallback_candidates)} fallback recommendations")
+            return fallback_candidates[:self.final_recommendations]
+            
+        except Exception as e:
+            self.logger.error(f"Fallback recommendation creation failed: {e}")
+            return []
+    
+    def _get_target_recommendations_count(self, state: MusicRecommenderState) -> int:
+        """Get the target recommendation count based on intent and configuration."""
+        try:
+            # Try to get from state's intent analysis first
+            intent_analysis = getattr(state, 'intent_analysis', {})
+            intent = intent_analysis.get('intent', 'discovery')
+            
+            # Check if the state has discovery parameters
+            if hasattr(state, 'discovery_params') and state.discovery_params:
+                final_recs = state.discovery_params.get('final_recommendations')
+                if final_recs and isinstance(final_recs, int) and final_recs > 0:
+                    self.logger.debug(f"Using final_recommendations from state: {final_recs}")
+                    return final_recs
+            
+            # Intent-specific defaults
+            intent_defaults = {
+                'artist_similarity': 20,
+                'by_artist': 20,  # Fixed: Changed from 25 to 20 to match expected track count
+                'discovery': 20,
+                'genre_mood': 20,
+                'contextual': 20,
+                'hybrid': 20
+            }
+            
+            target_count = intent_defaults.get(intent, self.final_recommendations)
+            self.logger.debug(f"Using intent-specific target count for {intent}: {target_count}")
+            return target_count
+            
+        except Exception as e:
+            self.logger.warning(f"Failed to determine target recommendations count: {e}")
+            return self.final_recommendations
+    
+    def _get_timestamp(self) -> str:
+        """Get current timestamp for metadata."""
+        try:
+            from datetime import datetime
+            return datetime.now().isoformat()
+        except Exception:
+            return "unknown"
+    
+    # Compatibility methods for existing codebase
+    async def evaluate_and_select(self, state: MusicRecommenderState) -> MusicRecommenderState:
+        """Compatibility method that delegates to process()."""
+        return await self.process(state)
+    
+    async def run(self, state: MusicRecommenderState) -> MusicRecommenderState:
+        """Compatibility method that delegates to process()."""
+        return await self.process(state)
     
     def _detect_hybrid_subtype(self, state: MusicRecommenderState) -> str:
         """
-        Detect hybrid sub-type from state information.
+        Compatibility method for hybrid subtype detection.
         
-        Args:
-            state: Current recommendation state
-            
-        Returns:
-            Hybrid sub-type or original intent if not hybrid
+        Note: This logic could be moved to QueryAnalysisUtils or PlannerAgent
+        in future refactoring iterations.
         """
         try:
-            # First check if we stored the sub-type in reasoning
-            if state.query_understanding and hasattr(state.query_understanding, 'reasoning'):
-                reasoning = state.query_understanding.reasoning
-                if 'Hybrid sub-type:' in reasoning:
-                    subtype = reasoning.split('Hybrid sub-type:')[1].strip()
-                    self.logger.info(f"🔧 Found stored hybrid sub-type: {subtype}")
-                    return f"hybrid_{subtype}"
+            entities = getattr(state, 'entities', {})
             
-            # 🔧 BETTER DETECTION: Analyze the query directly for similarity-primary patterns
-            if state.query_understanding and hasattr(state.query_understanding, 'original_query'):
-                query = state.query_understanding.original_query.lower()
-                
-                # Similarity-primary indicators: artist + "like" + modifier
-                similarity_phrases = ['like', 'similar to', 'sounds like', 'reminds me of']
-                has_similarity = any(phrase in query for phrase in similarity_phrases)
-                
-                # Style modifiers that indicate this is similarity + genre hybrid
-                style_modifiers = ['but', 'with', 'and', 'plus', 'jazzy', 'chill', 'upbeat', 'dark', 'electronic']
-                has_style_modifier = any(modifier in query for modifier in style_modifiers)
-                
-                # Check for artist names in entities
-                has_artists = False
-                if state.entities and state.entities.get('musical_entities', {}).get('artists', {}).get('primary'):
-                    has_artists = True
-                
-                # 🔧 KEY FIX: "Music like [Artist] but [style]" = similarity_primary 
-                if has_similarity and has_artists and has_style_modifier:
-                    self.logger.info(f"🔧 DETECTED SIMILARITY-PRIMARY: Query '{query}' has artist + similarity phrase + style modifier")
-                    return 'hybrid_similarity_primary'
-                
-                # Discovery-primary indicators
-                discovery_terms = ['underground', 'new', 'hidden', 'unknown', 'discover', 'find']
-                has_discovery = any(term in query for term in discovery_terms)
-                
-                if has_discovery:
-                    self.logger.info(f"🔧 DETECTED DISCOVERY-PRIMARY: Query '{query}' has discovery indicators")
-                    return 'hybrid_discovery_primary'
-                
-                # Genre-primary fallback
-                self.logger.info(f"🔧 DETECTED GENRE-PRIMARY: Default for style-focused hybrid query '{query}'")
-                return 'hybrid_genre_primary'
+            # Check for genre combinations
+            genres = entities.get('genres', [])
+            if len(genres) >= 2:
+                return 'genre_hybrid'
             
-            # Fallback: detect from query and entities using query utils
-            if state.query_understanding and state.entities:
-                query_utils = QueryAnalysisUtils()
-                
-                subtype = query_utils.detect_hybrid_subtype(
-                    state.query_understanding.original_query,
-                    state.entities
-                )
-                self.logger.info(f"🔧 Detected hybrid sub-type via query utils: {subtype}")
-                return f"hybrid_{subtype}"
-                
+            # Check for mood + genre combinations
+            moods = entities.get('moods', [])
+            if genres and moods:
+                return 'mood_genre_hybrid'
+            
+            # Check for artist + style combinations
+            artists = entities.get('artists', [])
+            if artists and (genres or moods):
+                return 'artist_style_hybrid'
+            
+            return 'standard'
+            
         except Exception as e:
-            self.logger.warning(f"Failed to detect hybrid sub-type: {e}")
-        
-        # Default fallback
-        return 'hybrid' 
-
-    async def run(self, state: MusicRecommenderState) -> MusicRecommenderState:
-        """
-        Main judge agent workflow.
-        """
-        self.logger.info("🏛️ JUDGE AGENT: Starting final candidate evaluation and ranking")
-        
-        # Collect all candidates from various agents
-        candidates = await self._collect_all_candidates(state)
-        
-        if not candidates:
-            self.logger.warning("No candidates received from advocate agents")
-            state.final_recommendations = []
-            return state
-        
-        self.logger.info(f"🔍 JUDGE: Collected {len(candidates)} total candidates for evaluation")
-        
-        # 🔧 NEW: Filter out recently shown tracks for follow-up queries
-        if state.recently_shown_track_ids:
-            original_count = len(candidates)
-            candidates = self._filter_out_recently_shown(candidates, state)
-            filtered_count = len(candidates)
-            
-            self.logger.info(
-                f"🚫 DUPLICATE FILTER: Filtered out {original_count - filtered_count} "
-                f"previously shown tracks (kept {filtered_count})"
-            )
-            
-            if not candidates:
-                self.logger.warning("All candidates were filtered as duplicates")
-                state.final_recommendations = []
-                return state
-        else:
-            self.logger.info("🔍 JUDGE DEBUG: No recently shown tracks to filter, skipping duplicate filtering")
-        
-        # Score all candidates
-        scored_candidates = await self._score_all_candidates(candidates, state)
-        
-        # Apply ranking and diversity constraints
-        final_recommendations = await self._rank_and_select(scored_candidates, state)
-        
-        state.final_recommendations = final_recommendations
-        
-        self.logger.info(f"✅ JUDGE: Selected {len(final_recommendations)} final recommendations")
-        
-        return state 
-
-    def _filter_out_recently_shown(
-        self, 
-        candidates: List[TrackRecommendation], 
-        state: MusicRecommenderState
-    ) -> List[TrackRecommendation]:
-        """Filter out tracks that were recently shown to avoid duplicates in follow-up queries."""
-        if not state.recently_shown_track_ids:
-            return candidates
-        
-        recently_shown_set = set(state.recently_shown_track_ids)
-        filtered_candidates = []
-        
-        # 🔧 DEBUG: Log the recently shown IDs
-        self.logger.info(
-            f"🚫 FILTERING DUPLICATES: Checking {len(candidates)} candidates against "
-            f"{len(recently_shown_set)} recently shown tracks"
-        )
-        self.logger.info(f"🚫 Recently shown track IDs: {list(recently_shown_set)}")
-        
-        for candidate in candidates:
-            # Create the same track ID format as used in EnhancedRecommendationService
-            candidate_track_id = f"{candidate.artist.lower().strip()}::{candidate.title.lower().strip()}"
-            
-            # 🔧 DEBUG: Log each candidate check
-            is_duplicate = candidate_track_id in recently_shown_set
-            self.logger.info(
-                f"🔍 Checking: '{candidate_track_id}' -> {'DUPLICATE' if is_duplicate else 'NEW'}"
-            )
-            
-            if not is_duplicate:
-                filtered_candidates.append(candidate)
-            else:
-                self.logger.info(
-                    f"🚫 Filtering duplicate: {candidate.title} by {candidate.artist} "
-                    f"(ID: {candidate_track_id})"
-                )
-        
-        return filtered_candidates 
+            self.logger.warning(f"Hybrid subtype detection failed: {e}")
+            return 'standard' 

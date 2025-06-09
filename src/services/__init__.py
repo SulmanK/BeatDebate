@@ -12,8 +12,8 @@ from .api_service import (
     close_api_service
 )
 
-from .enhanced_recommendation_service import (
-    EnhancedRecommendationService,
+from .recommendation_service import (
+    RecommendationService,
     RecommendationRequest,
     RecommendationResponse,
     get_recommendation_service,
@@ -26,12 +26,22 @@ from .metadata_service import (
     close_metadata_service
 )
 
-from .conversation_context_service import (
-    ConversationContextManager
+# ConversationContextManager functionality moved to SessionManagerService
+
+# Phase 1 Enhanced Services
+from .session_manager_service import (
+    SessionManagerService,
+    OriginalQueryContext,
+    CandidatePool,
+    ContextState
+)
+
+from .intent_orchestration_service import (
+    IntentOrchestrationService,
+    FollowUpType
 )
 
 # Existing services (maintained for backward compatibility)
-from .smart_context_manager import SmartContextManager
 from .cache_manager import CacheManager, get_cache_manager
 
 # Deprecated services (Phase 5: marked for removal)
@@ -43,7 +53,7 @@ __all__ = [
     "APIService",
     "get_api_service", 
     "close_api_service",
-    "EnhancedRecommendationService",
+    "RecommendationService",
     "RecommendationRequest",
     "RecommendationResponse", 
     "get_recommendation_service",
@@ -51,10 +61,16 @@ __all__ = [
     "MetadataService",
     "get_metadata_service",
     "close_metadata_service",
-    "ConversationContextManager",
+    
+    # Phase 1 Enhanced Services
+    "SessionManagerService",
+    "OriginalQueryContext", 
+    "CandidatePool",
+    "ContextState",
+    "IntentOrchestrationService",
+    "FollowUpType",
     
     # Existing services
-    "SmartContextManager",
     "CacheManager",
     "get_cache_manager",
 ]

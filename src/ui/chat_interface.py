@@ -694,7 +694,7 @@ class BeatDebateChatInterface:
                     
                     Discover perfect tracks using our sophisticated 4-agent AI system that understands your musical intent and collaborates intelligently!
                     
-                    **🔗 Competition Links:** [AgentX Submission](https://agentx.ai) • [GitHub Repository](https://github.com/beatdebate/beatdebate)
+                    **🔗 Competition Links:** [AgentX Submission](https://rdi.berkeley.edu/agentx/) • [GitHub Repository](https://github.com/SulmanK/BeatDebate)
                     
 
                     """)
